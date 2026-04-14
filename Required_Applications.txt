@@ -1,46 +1,48 @@
-# Power BI MCP Integration – System Setup Guide
+# Power BI MCP Integration – Complete Setup & Usage Guide
 
-## 📌 Overview
+## 📌 Introduction
 
-This document outlines all the required software, dependencies, and configurations needed to run the **Power BI MCP (Model Context Protocol) Integration Project** locally.
+This guide provides step-by-step instructions to set up and run the **Power BI MCP (Model Context Protocol) Integration Project**. It is intended for developers who want to connect an AI agent to **Power BI Desktop** for querying, analyzing, and interacting with semantic models using DAX.
 
-The setup enables:
+---
 
-* Connection to Power BI Desktop (local semantic model)
-* Execution of DAX queries
-* Metadata extraction (tables, measures, relationships)
-* AI-based interaction via MCP server
+# 🎯 What This Project Does
+
+* Connects to a running Power BI Desktop instance
+* Extracts metadata (tables, columns, measures, relationships)
+* Executes DAX queries programmatically
+* Enables AI-driven interaction with Power BI models
 
 ---
 
 # 🖥️ 1. System Requirements
 
-* OS: Windows 10 / Windows 11 (Recommended)
-* RAM: Minimum 8 GB (16 GB preferred)
-* Disk Space: At least 5–10 GB free
+| Requirement | Specification                    |
+| ----------- | -------------------------------- |
+| OS          | Windows 10 / 11                  |
+| RAM         | Minimum 8 GB (16 GB recommended) |
+| Storage     | 5–10 GB free space               |
 
 ---
 
-# 🐍 2. Python Installation
+# 🐍 2. Install Python
 
 ### ✅ Required Version
 
-* Python **3.10** (Highly recommended for compatibility)
+* Python **3.10**
 
-### ⚠️ Important
+### ⚠️ Important Notes
 
-Avoid:
+* Avoid Python 3.13 → incompatible with `pythonnet`
+* Python 3.11+ may cause issues with .NET bindings
 
-* Python 3.13 → causes compatibility issues with `clr`
-* Python 3.11+ → may break some .NET bindings
-
-### 🔧 Steps
+### 🔧 Installation Steps
 
 1. Download Python 3.10
-2. Install with:
+2. During installation:
 
-   * ✅ “Add Python to PATH”
-3. Verify:
+   * ✔ Enable **“Add Python to PATH”**
+3. Verify installation:
 
 ```bash
 python --version
@@ -48,7 +50,18 @@ python --version
 
 ---
 
-# 📦 3. Create Virtual Environment
+# 📁 3. Clone the Repository
+
+Clone the project from GitHub:
+
+```bash
+git clone https://github.com/gopikaJS28/Power-BI-MCP.git
+cd Power-BI-MCP
+```
+
+---
+
+# 📦 4. Create Virtual Environment
 
 ```bash
 python -m venv powerbi-env
@@ -62,31 +75,29 @@ powerbi-env\Scripts\activate
 
 ---
 
-# 📚 4. Required Python Packages
-
-Install all dependencies:
+# 📚 5. Install Required Python Packages
 
 ```bash
 pip install pythonnet psutil mcp
 ```
 
-### 📌 Package Purpose
+### 📌 Package Description
 
-| Package   | Purpose                                  |
-| --------- | ---------------------------------------- |
-| pythonnet | Enables .NET (ADOMD) integration         |
-| psutil    | Detects Power BI processes (msmdsrv.exe) |
-| mcp       | Model Context Protocol server            |
+| Package   | Purpose                                          |
+| --------- | ------------------------------------------------ |
+| pythonnet | Enables Python to use .NET libraries (ADOMD.NET) |
+| psutil    | Detects Power BI Desktop processes               |
+| mcp       | Runs the Model Context Protocol server           |
 
 ---
 
-# 🧩 5. ADOMD.NET Installation (CRITICAL)
+# 🧩 6. Install ADOMD.NET (Mandatory)
 
-### ✅ Required Component
+### 📌 What is this?
 
-**Microsoft.AnalysisServices.AdomdClient.dll**
+ADOMD.NET allows Python to connect to the Power BI semantic engine.
 
-### 📍 Install Location (Expected)
+### 📍 Expected Path
 
 ```
 C:\Program Files\Microsoft.NET\ADOMD.NET\160\
@@ -94,15 +105,15 @@ C:\Program Files\Microsoft.NET\ADOMD.NET\160\
 
 ---
 
-## 🔧 How to Install
+## 🔧 Installation Options
 
 ### Option 1 (Recommended)
 
 Install:
 
-* **Microsoft Analysis Services OLE DB Provider / ADOMD.NET**
+* Microsoft Analysis Services ADOMD.NET
 
-### Option 2 (Alternative)
+### Option 2
 
 Install:
 
@@ -110,9 +121,9 @@ Install:
 
 ---
 
-## ✅ Verify Installation
+## ✅ Verification
 
-Check if this file exists:
+Ensure this file exists:
 
 ```
 Microsoft.AnalysisServices.AdomdClient.dll
@@ -120,48 +131,40 @@ Microsoft.AnalysisServices.AdomdClient.dll
 
 ---
 
-# 📊 6. Power BI Desktop
+# 📊 7. Install Power BI Desktop
 
-### ✅ Install
+### ✅ Requirement
 
-* Power BI Desktop (latest version)
+Install the latest version of Power BI Desktop.
 
 ### ⚠️ Important
 
-* Must open a `.pbix` file before running MCP
-* This starts the **local Analysis Services engine (msmdsrv.exe)**
+* Open a `.pbix` file before running the MCP server
+* This starts the local Analysis Services engine (`msmdsrv.exe`)
 
 ---
 
-# 🔍 7. How Connection Works
-
-Your system connects using:
+# ⚙️ 8. How the System Works
 
 ```
-Power BI Desktop → msmdsrv.exe → localhost:<port> → ADOMD → Python → MCP
-```
-
----
-
-# ⚙️ 8. Environment Configuration
-
-Ensure PATH includes:
-
-* Python 3.10
-* Virtual environment scripts
-* ADOMD.NET path
-
-Example:
-
-```
-C:\Program Files\Microsoft.NET\ADOMD.NET\160
+Power BI Desktop (.pbix)
+        ↓
+msmdsrv.exe (local engine)
+        ↓
+ADOMD.NET
+        ↓
+Python Connector
+        ↓
+MCP Server
+        ↓
+AI Client (Claude / others)
 ```
 
 ---
 
 # 🚀 9. Running the MCP Server
 
-Run:
+From the project directory:
 
 ```bash
 python src/server.py
@@ -169,27 +172,52 @@ python src/server.py
 
 ---
 
-# 🔗 10. Claude MCP Configuration
+# 🔗 10. MCP Configuration
 
-In MCP config:
+Configure your MCP client:
 
 ```json
 {
   "command": "C:/path/to/powerbi-env/Scripts/python.exe",
-  "args": ["C:/path/to/src/server.py"]
+  "args": ["C:/path/to/Power-BI-MCP/src/server.py"]
 }
 ```
 
 ---
 
-# ⚠️ 11. Important Debug Rules
+# 📋 11. Available Capabilities
 
-## ❌ DO NOT use:
+Once connected, you can:
 
-* `print()` (breaks MCP JSON protocol)
-* Emojis (causes encoding errors)
+### 📊 Data Exploration
 
-## ✅ Use:
+* List tables
+* List columns
+* List measures
+
+### 🔍 Query Execution
+
+* Run DAX queries
+
+### 🏗️ Model Analysis
+
+* View relationships
+* Get full model structure
+
+### 🔐 Security
+
+* Apply RLS roles (Row-Level Security)
+
+---
+
+# ⚠️ 12. Important Development Rules
+
+## ❌ Avoid
+
+* Using `print()` → breaks MCP JSON communication
+* Using emojis (e.g., ✅ ❌) → causes encoding errors
+
+## ✅ Use
 
 ```python
 logger.info("message")
@@ -203,54 +231,63 @@ print("message", file=sys.stderr)
 
 ---
 
-# 🛠️ 12. Common Issues & Fixes
+# 🛠️ 13. Troubleshooting Guide
 
-## ❌ Error: ADOMD not found
+## ❌ ADOMD.NET not found
 
-✔ Fix:
+**Fix:**
 
 * Install ADOMD.NET
-* Check correct path
+* Verify correct path
 
 ---
 
-## ❌ Error: JSON parse failure
+## ❌ JSON Parse Error
 
-✔ Cause:
+**Cause:**
 
-* print() used in code
+* Output printed to stdout
 
-✔ Fix:
+**Fix:**
 
-* Remove print statements
+* Remove all `print()` statements
 
 ---
 
-## ❌ Error: UnicodeEncodeError
+## ❌ Unicode Error
 
-✔ Cause:
+**Cause:**
 
 * Emojis in logs
 
-✔ Fix:
+**Fix:**
 
 * Remove emojis
 
 ---
 
-## ❌ Error: No Power BI instance found
+## ❌ No Power BI Instance Found
 
-✔ Fix:
+**Fix:**
 
 * Open a `.pbix` file in Power BI Desktop
 
 ---
 
-# ✅ 13. Final Checklist
+## ❌ Git Issues (Optional)
+
+If pushing to GitHub fails:
+
+* Configure Git user name and email
+* Remove nested `.git` folders if present
+
+---
+
+# ✅ 14. Final Setup Checklist
 
 * [ ] Python 3.10 installed
 * [ ] Virtual environment created
-* [ ] Required packages installed
+* [ ] Dependencies installed
 * [ ] ADOMD.NET installed
 * [ ] Power BI Desktop installed
 * [ ] `.pbix` file open
@@ -259,25 +296,66 @@ print("message", file=sys.stderr)
 
 ---
 
-# 🎯 Outcome
+# 🎯 Expected Outcome
 
-After setup, you can:
+After setup, users will be able to:
 
-* Connect to Power BI Desktop
-* List tables, columns, measures
-* Execute DAX queries
-* Analyze model structure
-* Build AI-powered Power BI tools
+* Connect to Power BI Desktop models
+* Query data using DAX
+* Explore schema and relationships
+* Build AI-powered analytics workflows
 
 ---
 
-# 🚀 Future Enhancements (Optional)
+# 🚀 Future Enhancements
 
-* DAX auto-generation agent
+* AI-based DAX generation
 * Model validation engine
-* KPI explanation system
-* Visual editing via PBIP
+* KPI explanation assistant
+* Visual editing via PBIP files
 
 ---
 
-**End of Document**
+# 📌 Conclusion
+
+This project demonstrates how to integrate AI systems with Power BI’s semantic layer using MCP and ADOMD.NET, enabling advanced automation and intelligent data analysis workflows.
+
+---
+
+**End of Guide**
+Connecting to Claude MCP
+Step 1: Locate Claude Config
+
+Open:
+
+%APPDATA%\Claude\claude_desktop_config.json
+
+If not present → create it.
+
+Step 2: Add MCP Server Config
+{
+  "mcpServers": {
+    "powerbi": {
+      "command": "C:/Users/Gopika/OneDrive/Desktop/Power BI MCP/powerbi-env/Scripts/python.exe",
+      "args": [
+        "C:/Users/Gopika/OneDrive/Desktop/Power BI MCP/powerbi-mcp/src/server.py"
+      ]
+    }
+  }
+}
+
+⚠️ Important:
+
+Use absolute paths
+Use / or escaped \\
+Step 3: Restart Claude Desktop
+
+After restart, MCP will connect automatically.
+
+✅ Verification
+
+Once connected, you should see:
+
+✅ "Server started and connected successfully"
+✅ "Connected to Power BI Desktop"
+✅ Port detected (e.g., localhost:50948)
