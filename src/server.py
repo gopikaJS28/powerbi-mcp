@@ -3,6 +3,37 @@ Power BI MCP Server V2
 Supports both Power BI Service (Cloud) and Power BI Desktop (Local)
 Features: PII Detection, Audit Logging, Access Policies
 """
+import os
+import sys
+from pathlib import Path
+
+def preload_adomd():
+    dll_path = Path(r"C:\Program Files\Microsoft.NET\ADOMD.NET\160\Microsoft.AnalysisServices.AdomdClient.dll")
+
+    if dll_path.exists():
+        folder = str(dll_path.parent)
+
+        # Add to PATH
+        os.environ["PATH"] = folder + os.pathsep + os.environ.get("PATH", "")
+
+        # Add to sys.path
+        if folder not in sys.path:
+            sys.path.insert(0, folder)
+
+        # Load DLL globally
+        import clr
+        clr.AddReference(str(dll_path))
+
+        sys.stderr.write("ADOMD preloaded globally\n")
+
+    else:
+        sys.stderr.write("ADOMD DLL NOT FOUND\n")
+
+preload_adomd()
+import sys
+sys.path.append(r"C:\Program Files\Microsoft.NET\ADOMD.NET\160")
+import clr
+clr.AddReference("Microsoft.AnalysisServices.AdomdClient")
 import asyncio
 import json
 import logging

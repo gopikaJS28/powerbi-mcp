@@ -14,46 +14,47 @@ logger = logging.getLogger(__name__)
 # Add ADOMD.NET DLL path before importing pyadomd
 def _add_adomd_to_path():
     """Find and add ADOMD.NET DLL directory to system path"""
+
     possible_paths = [
-        # NuGet package locations
+        # YOUR ACTUAL INSTALL (MOST IMPORTANT)
+        Path(r"C:\Program Files\Microsoft.NET\ADOMD.NET\160"),
+        Path(r"C:\Program Files (x86)\Microsoft.NET\ADOMD.NET\160"),
+
+        # NuGet fallback
         Path(os.path.expandvars(r"%USERPROFILE%\.nuget\packages\microsoft.analysisservices.adomdclient.retail.amd64")),
-        # SQL Server Management Studio installations
+
+        # SQL Server SDK
         Path(r"C:\Program Files\Microsoft SQL Server\160\SDK\Assemblies"),
         Path(r"C:\Program Files\Microsoft SQL Server\150\SDK\Assemblies"),
-        Path(r"C:\Program Files\Microsoft SQL Server\140\SDK\Assemblies"),
-        # x86 versions
         Path(r"C:\Program Files (x86)\Microsoft SQL Server\160\SDK\Assemblies"),
         Path(r"C:\Program Files (x86)\Microsoft SQL Server\150\SDK\Assemblies"),
-        Path(r"C:\Program Files (x86)\Microsoft SQL Server\140\SDK\Assemblies"),
     ]
 
-    # Also search in Program Files recursively (from our earlier search)
-    update_cache_path = Path(r"C:\Program Files\Microsoft SQL Server\160\Setup Bootstrap\Update Cache")
-    if update_cache_path.exists():
-        # Get latest update folder
-        update_folders = list(update_cache_path.glob("*/GDR/x64"))
-        if update_folders:
-            # Sort by folder name (KB number) and get the latest
-            possible_paths.insert(0, sorted(update_folders)[-1])
-
     for path in possible_paths:
-        if path.exists():
-            dll_file = path / "Microsoft.AnalysisServices.AdomdClient.dll"
-            if dll_file.exists():
-                logger.info(f"Found ADOMD.NET DLL at: {path}")
-                # Add to system path
-                path_str = str(path)
-                if path_str not in sys.path:
-                    sys.path.insert(0, path_str)
-                if path_str not in os.environ.get('PATH', ''):
-                    os.environ['PATH'] = path_str + os.pathsep + os.environ.get('PATH', '')
+        dll_file = path / "Microsoft.AnalysisServices.AdomdClient.dll"
+
+        if dll_file.exists():
+            logger.info(f"Found ADOMD.NET DLL at: {dll_file}")
+
+            # Add directory to PATH
+            path_str = str(path)
+
+            if path_str not in sys.path:
+                sys.path.insert(0, path_str)
+
+            os.environ["PATH"] = path_str + os.pathsep + os.environ.get("PATH", "")
+
+            # LOAD using FULL PATH (this fixes error)
+            try:
+                import clr
+                clr.AddReference(str(dll_file))
+                logger.info("ADOMD.NET loaded successfully")
                 return True
+            except Exception as e:
+                logger.error(f"Failed loading DLL: {e}")
+                return False
 
     logger.error("ADOMD.NET client DLL not found")
-    logger.error("Please install one of the following:")
-    logger.error("1. SQL Server Management Studio (SSMS)")
-    logger.error("2. Microsoft ADOMD.NET NuGet package")
-    logger.error("3. Download from: https://docs.microsoft.com/sql/analysis-services/client-libraries")
     return False
 
 # Configure ADOMD path
@@ -64,9 +65,14 @@ if _adomd_available:
     try:
         from pyadomd import Pyadomd
         import clr
-        clr.AddReference("Microsoft.AnalysisServices.AdomdClient")
+
+        # DLL already loaded using full path earlier → DO NOT reload by name
+
         from Microsoft.AnalysisServices.AdomdClient import AdomdConnection, AdomdSchemaGuid
+
         logger.info("Successfully loaded ADOMD.NET assemblies")
+        logger.info(f"PATH used: {os.environ.get('PATH')}")
+
     except Exception as e:
         logger.error(f"Failed to load ADOMD.NET: {e}")
         _adomd_available = False
