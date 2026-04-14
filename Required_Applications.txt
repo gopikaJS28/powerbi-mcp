@@ -1,0 +1,283 @@
+# Power BI MCP Integration – System Setup Guide
+
+## 📌 Overview
+
+This document outlines all the required software, dependencies, and configurations needed to run the **Power BI MCP (Model Context Protocol) Integration Project** locally.
+
+The setup enables:
+
+* Connection to Power BI Desktop (local semantic model)
+* Execution of DAX queries
+* Metadata extraction (tables, measures, relationships)
+* AI-based interaction via MCP server
+
+---
+
+# 🖥️ 1. System Requirements
+
+* OS: Windows 10 / Windows 11 (Recommended)
+* RAM: Minimum 8 GB (16 GB preferred)
+* Disk Space: At least 5–10 GB free
+
+---
+
+# 🐍 2. Python Installation
+
+### ✅ Required Version
+
+* Python **3.10** (Highly recommended for compatibility)
+
+### ⚠️ Important
+
+Avoid:
+
+* Python 3.13 → causes compatibility issues with `clr`
+* Python 3.11+ → may break some .NET bindings
+
+### 🔧 Steps
+
+1. Download Python 3.10
+2. Install with:
+
+   * ✅ “Add Python to PATH”
+3. Verify:
+
+```bash
+python --version
+```
+
+---
+
+# 📦 3. Create Virtual Environment
+
+```bash
+python -m venv powerbi-env
+```
+
+Activate:
+
+```bash
+powerbi-env\Scripts\activate
+```
+
+---
+
+# 📚 4. Required Python Packages
+
+Install all dependencies:
+
+```bash
+pip install pythonnet psutil mcp
+```
+
+### 📌 Package Purpose
+
+| Package   | Purpose                                  |
+| --------- | ---------------------------------------- |
+| pythonnet | Enables .NET (ADOMD) integration         |
+| psutil    | Detects Power BI processes (msmdsrv.exe) |
+| mcp       | Model Context Protocol server            |
+
+---
+
+# 🧩 5. ADOMD.NET Installation (CRITICAL)
+
+### ✅ Required Component
+
+**Microsoft.AnalysisServices.AdomdClient.dll**
+
+### 📍 Install Location (Expected)
+
+```
+C:\Program Files\Microsoft.NET\ADOMD.NET\160\
+```
+
+---
+
+## 🔧 How to Install
+
+### Option 1 (Recommended)
+
+Install:
+
+* **Microsoft Analysis Services OLE DB Provider / ADOMD.NET**
+
+### Option 2 (Alternative)
+
+Install:
+
+* SQL Server Feature Pack (includes ADOMD.NET)
+
+---
+
+## ✅ Verify Installation
+
+Check if this file exists:
+
+```
+Microsoft.AnalysisServices.AdomdClient.dll
+```
+
+---
+
+# 📊 6. Power BI Desktop
+
+### ✅ Install
+
+* Power BI Desktop (latest version)
+
+### ⚠️ Important
+
+* Must open a `.pbix` file before running MCP
+* This starts the **local Analysis Services engine (msmdsrv.exe)**
+
+---
+
+# 🔍 7. How Connection Works
+
+Your system connects using:
+
+```
+Power BI Desktop → msmdsrv.exe → localhost:<port> → ADOMD → Python → MCP
+```
+
+---
+
+# ⚙️ 8. Environment Configuration
+
+Ensure PATH includes:
+
+* Python 3.10
+* Virtual environment scripts
+* ADOMD.NET path
+
+Example:
+
+```
+C:\Program Files\Microsoft.NET\ADOMD.NET\160
+```
+
+---
+
+# 🚀 9. Running the MCP Server
+
+Run:
+
+```bash
+python src/server.py
+```
+
+---
+
+# 🔗 10. Claude MCP Configuration
+
+In MCP config:
+
+```json
+{
+  "command": "C:/path/to/powerbi-env/Scripts/python.exe",
+  "args": ["C:/path/to/src/server.py"]
+}
+```
+
+---
+
+# ⚠️ 11. Important Debug Rules
+
+## ❌ DO NOT use:
+
+* `print()` (breaks MCP JSON protocol)
+* Emojis (causes encoding errors)
+
+## ✅ Use:
+
+```python
+logger.info("message")
+```
+
+OR:
+
+```python
+print("message", file=sys.stderr)
+```
+
+---
+
+# 🛠️ 12. Common Issues & Fixes
+
+## ❌ Error: ADOMD not found
+
+✔ Fix:
+
+* Install ADOMD.NET
+* Check correct path
+
+---
+
+## ❌ Error: JSON parse failure
+
+✔ Cause:
+
+* print() used in code
+
+✔ Fix:
+
+* Remove print statements
+
+---
+
+## ❌ Error: UnicodeEncodeError
+
+✔ Cause:
+
+* Emojis in logs
+
+✔ Fix:
+
+* Remove emojis
+
+---
+
+## ❌ Error: No Power BI instance found
+
+✔ Fix:
+
+* Open a `.pbix` file in Power BI Desktop
+
+---
+
+# ✅ 13. Final Checklist
+
+* [ ] Python 3.10 installed
+* [ ] Virtual environment created
+* [ ] Required packages installed
+* [ ] ADOMD.NET installed
+* [ ] Power BI Desktop installed
+* [ ] `.pbix` file open
+* [ ] MCP server running
+* [ ] No `print()` in code
+
+---
+
+# 🎯 Outcome
+
+After setup, you can:
+
+* Connect to Power BI Desktop
+* List tables, columns, measures
+* Execute DAX queries
+* Analyze model structure
+* Build AI-powered Power BI tools
+
+---
+
+# 🚀 Future Enhancements (Optional)
+
+* DAX auto-generation agent
+* Model validation engine
+* KPI explanation system
+* Visual editing via PBIP
+
+---
+
+**End of Document**
