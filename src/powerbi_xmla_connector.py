@@ -82,13 +82,52 @@ else:
 
 
 class PowerBIXmlaConnector:
-    """Power BI connector using XMLA endpoint with pyadomd"""
+    """Power BI connector using XMLA endpoint with pyadomd.
 
-    def __init__(self, tenant_id: str, client_id: str, client_secret: str):
-        """Initialize connector with Azure AD credentials"""
+    Supports three authentication modes:
+    - Service Principal: pass tenant_id, client_id, client_secret
+    - Username/Password: pass username and password (no App Registration needed)
+      Note: MFA must NOT be required for the account used.
+    - Device Flow: pass access_token (obtained via MSAL device flow)
+      Works with MFA — token is acquired externally by the REST connector.
+    """
+
+    def __init__(
+        self,
+        tenant_id: str = "",
+        client_id: str = "",
+        client_secret: str = "",
+        username: Optional[str] = None,
+        password: Optional[str] = None,
+        access_token: Optional[str] = None,
+        auth_mode: Optional[str] = None,
+    ):
+        """Initialize connector.
+
+        Args:
+            tenant_id: Azure AD tenant ID (Service Principal mode)
+            client_id: App client ID (Service Principal mode)
+            client_secret: App client secret (Service Principal mode)
+            username: Power BI user email e.g. user@domain.com (User mode)
+            password: Power BI user password (User mode)
+            access_token: Bearer token from MSAL device flow (Device Flow mode)
+            auth_mode: Explicit auth mode override: 'service_principal', 'user', or 'device_flow'
+        """
         self.tenant_id = tenant_id
         self.client_id = client_id
         self.client_secret = client_secret
+        self.username = username
+        self.password = password
+        self.access_token = access_token
+        # Determine auth mode
+        if auth_mode:
+            self.auth_mode = auth_mode
+        elif access_token:
+            self.auth_mode = "device_flow"
+        elif username and password:
+            self.auth_mode = "user"
+        else:
+            self.auth_mode = "service_principal"
         self.connection_string = None
         self.connection = None
         self.workspace_name = None
@@ -97,7 +136,11 @@ class PowerBIXmlaConnector:
 
     def connect(self, workspace_name: str, dataset_name: str, effective_user: Optional[str] = None) -> bool:
         """
-        Connect to Power BI dataset via XMLA endpoint
+        Connect to Power BI dataset via XMLA endpoint.
+
+        Automatically uses the configured auth mode:
+        - 'service_principal': authenticates as App (requires tenant_id, client_id, client_secret)
+        - 'user': authenticates as a Power BI user (requires username + password, no MFA)
 
         Args:
             workspace_name: Name of the Power BI workspace
@@ -122,14 +165,38 @@ class PowerBIXmlaConnector:
             # Format: powerbi://api.powerbi.com/v1.0/myorg/WorkspaceName
             xmla_endpoint = f"powerbi://api.powerbi.com/v1.0/myorg/{workspace_name}"
 
-            # Build connection string with Service Principal authentication
-            self.connection_string = (
-                f"Provider=MSOLAP;"
-                f"Data Source={xmla_endpoint};"
-                f"Initial Catalog={dataset_name};"
-                f"User ID=app:{self.client_id}@{self.tenant_id};"
-                f"Password={self.client_secret};"
-            )
+            if self.auth_mode == "device_flow":
+                # ── Device Flow auth (bearer token, works with MFA) ────────────
+                logger.info("Auth mode: device_flow (bearer token)")
+                self.connection_string = (
+                    f"Provider=MSOLAP;"
+                    f"Data Source={xmla_endpoint};"
+                    f"Initial Catalog={dataset_name};"
+                    f"Password={self.access_token};"
+                    f"Persist Security Info=True;"
+                )
+            elif self.auth_mode == "user":
+                # ── Username / Password auth (no App Registration needed) ──────────
+                # Requires: Power BI user account with no MFA on XMLA connections
+                logger.info(f"Auth mode: username/password ({self.username})")
+                self.connection_string = (
+                    f"Provider=MSOLAP;"
+                    f"Data Source={xmla_endpoint};"
+                    f"Initial Catalog={dataset_name};"
+                    f"User ID={self.username};"
+                    f"Password={self.password};"
+                    f"Persist Security Info=True;"
+                )
+            else:
+                # ── Service Principal auth ────────────────────────────────────────
+                logger.info(f"Auth mode: service_principal (app:{self.client_id}@{self.tenant_id})")
+                self.connection_string = (
+                    f"Provider=MSOLAP;"
+                    f"Data Source={xmla_endpoint};"
+                    f"Initial Catalog={dataset_name};"
+                    f"User ID=app:{self.client_id}@{self.tenant_id};"
+                    f"Password={self.client_secret};"
+                )
 
             # Add EffectiveUserName for RLS impersonation if specified
             if effective_user:
@@ -160,7 +227,10 @@ class PowerBIXmlaConnector:
                 # Check for common error messages
                 error_msg = str(conn_error).lower()
                 if "login" in error_msg or "auth" in error_msg:
-                    logger.error("Authentication failed - check Service Principal credentials")
+                    if self.auth_mode == "user":
+                        logger.error("Authentication failed - check username/password, or MFA may be blocking XMLA access")
+                    else:
+                        logger.error("Authentication failed - check Service Principal credentials")
                 elif "catalog" in error_msg or "database" in error_msg:
                     logger.error("Dataset (catalog) not found - check dataset name")
                 elif "workspace" in error_msg or "server" in error_msg:

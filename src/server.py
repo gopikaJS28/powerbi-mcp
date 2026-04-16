@@ -40,6 +40,7 @@ import logging
 import os
 import sys
 import time
+import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -77,10 +78,43 @@ class PowerBIMCPServer:
     def __init__(self):
         self.server = Server("powerbi-mcp-v2")
 
-        # Cloud credentials (optional for Desktop-only usage)
+        # Cloud credentials — Service Principal mode
         self.tenant_id = os.getenv("TENANT_ID", "")
         self.client_id = os.getenv("CLIENT_ID", "")
         self.client_secret = os.getenv("CLIENT_SECRET", "")
+
+        # Cloud credentials — Username/Password mode (no App Registration needed)
+        self.pbi_username = os.getenv("PBI_USERNAME", "")
+        self.pbi_password = os.getenv("PBI_PASSWORD", "")
+
+        # Explicit auth mode override from .env
+        self.explicit_auth_mode = os.getenv("AUTH_MODE", "").strip().lower()
+
+        # Determine which auth mode is active
+        if self.explicit_auth_mode == "device_flow":
+            # Device Flow: requires TENANT_ID + CLIENT_ID (no secret needed)
+            if self.tenant_id and self.client_id:
+                self.cloud_auth_mode = "device_flow"
+                logger.info("Cloud auth mode: device_flow (interactive browser login)")
+            else:
+                self.cloud_auth_mode = "none"
+                logger.error("AUTH_MODE=device_flow but TENANT_ID/CLIENT_ID missing!")
+        elif self.pbi_username and self.pbi_password:
+            self.cloud_auth_mode = "user"
+            logger.info(f"Cloud auth mode: username/password ({self.pbi_username})")
+        elif self.tenant_id and self.client_id and self.client_secret:
+            self.cloud_auth_mode = "service_principal"
+            logger.info("Cloud auth mode: service_principal")
+        else:
+            self.cloud_auth_mode = "none"
+            logger.info("Cloud auth mode: not configured (Desktop-only)")
+
+        # Cached access token from device flow (shared between REST and XMLA)
+        self._device_flow_token: Optional[str] = None
+
+        # Device flow background auth state
+        self._device_flow_ready = threading.Event()  # set when auth completes (success or fail)
+        self._device_flow_success = False
 
         # Connector instances
         self.rest_connector: Optional[PowerBIRestConnector] = None
@@ -667,6 +701,262 @@ class PowerBIMCPServer:
                         "properties": {},
                         "required": []
                     }
+                ),
+                # === PBIP VISUAL/REPORT TOOLS ===
+                Tool(
+                    name="pbip_list_visuals",
+                    description="List all visuals/pages in the loaded PBIP project. Shows visual names, types, dimensions, and which page they're on. Supports both PBIR-Legacy (single report.json) and PBIR-Enhanced (individual visual.json) formats.",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {},
+                        "required": []
+                    }
+                ),
+                # === CLOUD REPORT TOOLS ===
+                Tool(
+                    name="list_reports",
+                    description="List all reports in a Power BI Service workspace. Returns report names, IDs, associated dataset IDs, and web URLs.",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "workspace_id": {
+                                "type": "string",
+                                "description": "ID of the workspace"
+                            }
+                        },
+                        "required": ["workspace_id"]
+                    }
+                ),
+                Tool(
+                    name="get_report_pages",
+                    description="Get all pages of a Power BI Service report. Returns page names, display names, and order.",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "workspace_id": {
+                                "type": "string",
+                                "description": "ID of the workspace"
+                            },
+                            "report_id": {
+                                "type": "string",
+                                "description": "ID of the report"
+                            }
+                        },
+                        "required": ["workspace_id", "report_id"]
+                    }
+                ),
+                Tool(
+                    name="get_page_visuals",
+                    description="Get all visuals on a specific page of a Power BI Service report. Returns visual names, titles, types, and layout info.",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "workspace_id": {
+                                "type": "string",
+                                "description": "ID of the workspace"
+                            },
+                            "report_id": {
+                                "type": "string",
+                                "description": "ID of the report"
+                            },
+                            "page_name": {
+                                "type": "string",
+                                "description": "Internal page name (from get_report_pages)"
+                            }
+                        },
+                        "required": ["workspace_id", "report_id", "page_name"]
+                    }
+                ),
+                # === PBIP VISUAL/REPORT EDITING TOOLS ===
+                Tool(
+                    name="pbip_get_visual_details",
+                    description="Get detailed information about a specific visual in the loaded PBIP project, including data bindings (tables, columns, measures), filters, position, and full configuration.",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "page_name": {
+                                "type": "string",
+                                "description": "Display name or ID of the page containing the visual"
+                            },
+                            "visual_id": {
+                                "type": "string",
+                                "description": "ID or name of the visual (from pbip_list_visuals)"
+                            }
+                        },
+                        "required": ["page_name", "visual_id"]
+                    }
+                ),
+                Tool(
+                    name="pbip_add_page",
+                    description="Add a new page to the loaded PBIP report. Creates an empty page where visuals can be added. Close Power BI Desktop before editing, then reopen after.",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "display_name": {
+                                "type": "string",
+                                "description": "Display name for the new page"
+                            },
+                            "width": {
+                                "type": "integer",
+                                "description": "Page width in pixels (default: 1280)",
+                                "default": 1280
+                            },
+                            "height": {
+                                "type": "integer",
+                                "description": "Page height in pixels (default: 720)",
+                                "default": 720
+                            }
+                        },
+                        "required": ["display_name"]
+                    }
+                ),
+                Tool(
+                    name="pbip_delete_page",
+                    description="Delete a page from the loaded PBIP report. Removes the page and all its visuals. Close Power BI Desktop before editing.",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "page_name": {
+                                "type": "string",
+                                "description": "Display name or ID of the page to delete"
+                            }
+                        },
+                        "required": ["page_name"]
+                    }
+                ),
+                Tool(
+                    name="pbip_add_visual",
+                    description="Add a new visual to a page in the loaded PBIP report. Supports all visual types (barChart, lineChart, tableEx, card, slicer, pieChart, etc.). Optionally bind data from a table/column/measure. Close Power BI Desktop before editing.",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "page_name": {
+                                "type": "string",
+                                "description": "Display name or ID of the target page"
+                            },
+                            "visual_type": {
+                                "type": "string",
+                                "description": "Type of visual: barChart, lineChart, tableEx, card, slicer, pieChart, donutChart, clusteredBarChart, clusteredColumnChart, areaChart, treemap, waterfallChart, funnel, gauge, multiRowCard, kpi, textbox, image, shape, actionButton"
+                            },
+                            "x": {
+                                "type": "integer",
+                                "description": "X position on canvas (default: 0)",
+                                "default": 0
+                            },
+                            "y": {
+                                "type": "integer",
+                                "description": "Y position on canvas (default: 0)",
+                                "default": 0
+                            },
+                            "width": {
+                                "type": "integer",
+                                "description": "Width in pixels (default: 400)",
+                                "default": 400
+                            },
+                            "height": {
+                                "type": "integer",
+                                "description": "Height in pixels (default: 300)",
+                                "default": 300
+                            },
+                            "table_name": {
+                                "type": "string",
+                                "description": "Optional: table name to bind data from"
+                            },
+                            "column_name": {
+                                "type": "string",
+                                "description": "Optional: column name to bind (requires table_name)"
+                            },
+                            "measure_name": {
+                                "type": "string",
+                                "description": "Optional: measure name to bind (requires table_name)"
+                            }
+                        },
+                        "required": ["page_name", "visual_type"]
+                    }
+                ),
+                Tool(
+                    name="pbip_update_visual",
+                    description="Update an existing visual's properties in the loaded PBIP report. Can change visual type, position, size, and data bindings. Only specified properties are updated. Close Power BI Desktop before editing.",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "page_name": {
+                                "type": "string",
+                                "description": "Display name or ID of the page"
+                            },
+                            "visual_id": {
+                                "type": "string",
+                                "description": "ID or name of the visual to update"
+                            },
+                            "visual_type": {
+                                "type": "string",
+                                "description": "New visual type (optional)"
+                            },
+                            "x": {
+                                "type": "integer",
+                                "description": "New X position (optional)"
+                            },
+                            "y": {
+                                "type": "integer",
+                                "description": "New Y position (optional)"
+                            },
+                            "width": {
+                                "type": "integer",
+                                "description": "New width (optional)"
+                            },
+                            "height": {
+                                "type": "integer",
+                                "description": "New height (optional)"
+                            },
+                            "table_name": {
+                                "type": "string",
+                                "description": "New table to bind data from (optional)"
+                            },
+                            "column_name": {
+                                "type": "string",
+                                "description": "New column to bind (optional, requires table_name)"
+                            },
+                            "measure_name": {
+                                "type": "string",
+                                "description": "New measure to bind (optional, requires table_name)"
+                            }
+                        },
+                        "required": ["page_name", "visual_id"]
+                    }
+                ),
+                Tool(
+                    name="pbip_delete_visual",
+                    description="Delete a visual from a page in the loaded PBIP report. Close Power BI Desktop before editing.",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "page_name": {
+                                "type": "string",
+                                "description": "Display name or ID of the page"
+                            },
+                            "visual_id": {
+                                "type": "string",
+                                "description": "ID or name of the visual to delete"
+                            }
+                        },
+                        "required": ["page_name", "visual_id"]
+                    }
+                ),
+                # === UTILITY TOOLS ===
+                Tool(
+                    name="check_tool",
+                    description="Add multiple numbers together and return the sum",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "numbers": {
+                                "type": "array",
+                                "items": {"type": "number"},
+                                "description": "List of numbers to add"
+                            }
+                        },
+                        "required": ["numbers"]
+                    }
                 )
             ]
             return tools
@@ -753,6 +1043,31 @@ class PowerBIMCPServer:
                     result = await self._handle_pbip_scan_broken_refs()
                 elif name == "pbip_validate":
                     result = await self._handle_pbip_validate()
+                # PBIP Visual/Report tools
+                elif name == "pbip_list_visuals":
+                    result = await self._handle_pbip_list_visuals()
+                elif name == "pbip_get_visual_details":
+                    result = await self._handle_pbip_get_visual_details(args)
+                elif name == "pbip_add_page":
+                    result = await self._handle_pbip_add_page(args)
+                elif name == "pbip_delete_page":
+                    result = await self._handle_pbip_delete_page(args)
+                elif name == "pbip_add_visual":
+                    result = await self._handle_pbip_add_visual(args)
+                elif name == "pbip_update_visual":
+                    result = await self._handle_pbip_update_visual(args)
+                elif name == "pbip_delete_visual":
+                    result = await self._handle_pbip_delete_visual(args)
+                # Cloud Report tools
+                elif name == "list_reports":
+                    result = await self._handle_list_reports(args)
+                elif name == "get_report_pages":
+                    result = await self._handle_get_report_pages(args)
+                elif name == "get_page_visuals":
+                    result = await self._handle_get_page_visuals(args)
+                # Utility tools
+                elif name == "check_tool":
+                    result = await self._handle_check_tool(args)
                 else:
                     result = f"Unknown tool: {name}"
 
@@ -1027,28 +1342,90 @@ class PowerBIMCPServer:
 
     def _get_rest_connector(self) -> Optional[PowerBIRestConnector]:
         """Get or create REST connector"""
-        if not self.tenant_id or not self.client_id or not self.client_secret:
+        if self.cloud_auth_mode == "none":
             logger.warning("Cloud credentials not configured")
             return None
 
+        # If device flow auth is still in progress, wait briefly or inform caller
+        if self.cloud_auth_mode == "device_flow" and not self._device_flow_ready.is_set():
+            logger.info("Device flow auth in progress — waiting up to 5s...")
+            self._device_flow_ready.wait(timeout=5)
+            if not self._device_flow_ready.is_set():
+                return None  # Still not ready
+
+        if self.cloud_auth_mode == "device_flow" and not self._device_flow_success:
+            logger.warning("Device flow auth failed or not completed")
+            return None
+
         if not self.rest_connector:
-            self.rest_connector = PowerBIRestConnector(
-                self.tenant_id, self.client_id, self.client_secret
-            )
+            if self.cloud_auth_mode == "device_flow":
+                self.rest_connector = PowerBIRestConnector(
+                    self.tenant_id, self.client_id,
+                    auth_mode="device_flow"
+                )
+                # If we already have a token from startup auth, set it
+                if self._device_flow_token:
+                    self.rest_connector.access_token = self._device_flow_token
+            elif self.cloud_auth_mode == "user":
+                # REST API with username/password requires MSAL public client flow —
+                # not yet implemented. list_workspaces/list_datasets unavailable in user mode.
+                logger.warning("REST API not available in username/password mode")
+                return None
+            else:
+                self.rest_connector = PowerBIRestConnector(
+                    self.tenant_id, self.client_id, self.client_secret,
+                    auth_mode="service_principal"
+                )
         return self.rest_connector
 
     def _get_xmla_connector(self, workspace_name: str, dataset_name: str) -> Optional[PowerBIXmlaConnector]:
-        """Get or create XMLA connector for a specific workspace/dataset"""
-        if not self.tenant_id or not self.client_id or not self.client_secret:
+        """Get or create XMLA connector for a specific workspace/dataset.
+
+        Supports all auth modes:
+        - 'device_flow': uses bearer token from MSAL device flow
+        - 'user': uses PBI_USERNAME + PBI_PASSWORD from .env
+        - 'service_principal': uses TENANT_ID + CLIENT_ID + CLIENT_SECRET from .env
+        """
+        if self.cloud_auth_mode == "none":
             logger.warning("Cloud credentials not configured")
+            return None
+
+        # If device flow auth is still in progress, wait briefly
+        if self.cloud_auth_mode == "device_flow" and not self._device_flow_ready.is_set():
+            logger.info("Device flow auth in progress — waiting up to 5s...")
+            self._device_flow_ready.wait(timeout=5)
+            if not self._device_flow_ready.is_set():
+                return None
+
+        if self.cloud_auth_mode == "device_flow" and not self._device_flow_success:
+            logger.warning("Device flow auth failed or not completed")
             return None
 
         cache_key = f"{workspace_name}:{dataset_name}"
 
         if cache_key not in self.xmla_connector_cache:
-            connector = PowerBIXmlaConnector(
-                self.tenant_id, self.client_id, self.client_secret
-            )
+            if self.cloud_auth_mode == "device_flow":
+                # Refresh token if needed via REST connector
+                token = self._device_flow_token
+                if self.rest_connector:
+                    self.rest_connector.refresh_token_if_needed()
+                    token = self.rest_connector.access_token
+                    self._device_flow_token = token
+
+                connector = PowerBIXmlaConnector(
+                    access_token=token,
+                    auth_mode="device_flow",
+                )
+            elif self.cloud_auth_mode == "user":
+                connector = PowerBIXmlaConnector(
+                    username=self.pbi_username,
+                    password=self.pbi_password,
+                )
+            else:
+                connector = PowerBIXmlaConnector(
+                    self.tenant_id, self.client_id, self.client_secret
+                )
+
             if connector.connect(workspace_name, dataset_name):
                 self.xmla_connector_cache[cache_key] = connector
             else:
@@ -1061,6 +1438,10 @@ class PowerBIMCPServer:
         try:
             connector = self._get_rest_connector()
             if not connector:
+                if self.cloud_auth_mode == "device_flow" and not self._device_flow_ready.is_set():
+                    return "⏳ Device Flow authentication is still in progress. Please check the MCP server logs for the login URL and code, complete the sign-in, then try again."
+                elif self.cloud_auth_mode == "device_flow" and not self._device_flow_success:
+                    return "❌ Device Flow authentication failed. Please restart the MCP server and try signing in again."
                 return "Error: Cloud credentials not configured. Set TENANT_ID, CLIENT_ID, CLIENT_SECRET in .env"
 
             workspaces = await asyncio.get_event_loop().run_in_executor(
@@ -2329,11 +2710,563 @@ class PowerBIMCPServer:
             logger.error(f"PBIP validate error: {e}")
             return f"Error: {str(e)}"
 
+    # ==================== PBIP VISUAL/REPORT HANDLERS ====================
+
+    async def _handle_pbip_list_visuals(self) -> str:
+        """List all visuals in the loaded PBIP project"""
+        try:
+            connector = self._get_pbip_connector()
+
+            if not connector.current_project:
+                return "No PBIP project loaded. Use 'pbip_load_project' first."
+
+            # Get visuals
+            result = connector.list_visuals()
+
+            if not result.get("success"):
+                return f"Error: {result.get('error', 'Unknown error')}"
+
+            visuals = result.get("visuals", [])
+            report_format = result.get("format", "Unknown")
+
+            response = f"=== PBIP Project Visuals ===\n\n"
+            response += f"Report Format: {report_format}\n"
+            response += f"Total Visuals: {len(visuals)}\n\n"
+
+            if not visuals:
+                response += "No visuals found in this project.\n"
+                return response
+
+            # Group visuals by page
+            by_page = {}
+            for visual in visuals:
+                page_name = visual.get("page_name", "Unknown")
+                if page_name not in by_page:
+                    by_page[page_name] = []
+                by_page[page_name].append(visual)
+
+            # Display by page
+            for page_name in sorted(by_page.keys()):
+                page_visuals = by_page[page_name]
+                response += f"--- Page: {page_name} ({len(page_visuals)} visual(s)) ---\n\n"
+
+                for i, visual in enumerate(page_visuals, 1):
+                    response += f"  {i}. Visual: {visual.get('visual_name', 'Unnamed')}\n"
+                    response += f"     ID: {visual.get('visual_id', 'N/A')}\n"
+                    response += f"     Type: {visual.get('type', 'Unknown')}\n"
+
+                    # Dimensions
+                    if "dimensions" in visual:
+                        dims = visual["dimensions"]
+                        response += f"     Position: ({dims.get('x', 0)}, {dims.get('y', 0)})\n"
+                        response += f"     Size: {dims.get('width', 0)} x {dims.get('height', 0)}\n"
+
+                    # Bindings
+                    if visual.get("has_bindings"):
+                        response += f"     Data Bindings: {visual.get('binding_count', 0)}\n"
+
+                    if visual.get("uses_filters"):
+                        response += f"     Has Filters: Yes\n"
+
+                    response += "\n"
+
+            response += "\n💡 Use 'pbip_rename_tables', 'pbip_rename_columns', or 'pbip_rename_measures' to safely modify visuals.\n"
+
+            return response
+
+        except Exception as e:
+            logger.error(f"PBIP list visuals error: {e}")
+            return f"Error: {str(e)}"
+
+    # ==================== CLOUD REPORT HANDLERS ====================
+
+    async def _handle_list_reports(self, args: Dict[str, Any]) -> str:
+        """List reports in a workspace"""
+        try:
+            connector = self._get_rest_connector()
+            workspace_id = args.get("workspace_id")
+
+            if not connector:
+                return "Error: Cloud credentials not configured."
+
+            if not workspace_id:
+                return "Error: workspace_id is required"
+
+            reports = await asyncio.get_event_loop().run_in_executor(
+                None, connector.list_reports, workspace_id
+            )
+
+            if not reports:
+                return "No reports found in this workspace."
+
+            result = f"Reports ({len(reports)}):\n\n"
+            for r in reports:
+                result += f"  - {r['name']}\n"
+                result += f"    ID: {r['id']}\n"
+                result += f"    Type: {r.get('reportType', 'Unknown')}\n"
+                result += f"    Dataset ID: {r.get('datasetId', 'N/A')}\n"
+                if r.get('webUrl'):
+                    result += f"    Web URL: {r['webUrl']}\n"
+                result += "\n"
+
+            result += "\nUse 'get_report_pages' with a report_id to see pages."
+            return result
+
+        except Exception as e:
+            logger.error(f"List reports error: {e}")
+            return f"Error listing reports: {str(e)}"
+
+    async def _handle_get_report_pages(self, args: Dict[str, Any]) -> str:
+        """Get pages of a report"""
+        try:
+            connector = self._get_rest_connector()
+            workspace_id = args.get("workspace_id")
+            report_id = args.get("report_id")
+
+            if not connector:
+                return "Error: Cloud credentials not configured."
+
+            if not workspace_id or not report_id:
+                return "Error: workspace_id and report_id are required"
+
+            pages = await asyncio.get_event_loop().run_in_executor(
+                None, connector.get_report_pages, workspace_id, report_id
+            )
+
+            if not pages:
+                return "No pages found in this report."
+
+            result = f"Report Pages ({len(pages)}):\n\n"
+            for i, p in enumerate(pages, 1):
+                result += f"  {i}. {p.get('displayName', 'Unnamed')}\n"
+                result += f"     Name: {p.get('name', 'N/A')}\n"
+                result += f"     Order: {p.get('order', 0)}\n\n"
+
+            result += "\nUse 'get_page_visuals' with a page name to see visuals on a page."
+            return result
+
+        except Exception as e:
+            logger.error(f"Get report pages error: {e}")
+            return f"Error getting report pages: {str(e)}"
+
+    async def _handle_get_page_visuals(self, args: Dict[str, Any]) -> str:
+        """Get visuals on a specific page"""
+        try:
+            connector = self._get_rest_connector()
+            workspace_id = args.get("workspace_id")
+            report_id = args.get("report_id")
+            page_name = args.get("page_name")
+
+            if not connector:
+                return "Error: Cloud credentials not configured."
+
+            if not all([workspace_id, report_id, page_name]):
+                return "Error: workspace_id, report_id, and page_name are required"
+
+            visuals = await asyncio.get_event_loop().run_in_executor(
+                None, connector.get_page_visuals, workspace_id, report_id, page_name
+            )
+
+            if not visuals:
+                return f"No visuals found on page '{page_name}'."
+
+            result = f"Visuals on page '{page_name}' ({len(visuals)}):\n\n"
+            for i, v in enumerate(visuals, 1):
+                result += f"  {i}. {v.get('title', 'Untitled')}\n"
+                result += f"     Name: {v.get('name', 'N/A')}\n"
+                result += f"     Type: {v.get('type', 'Unknown')}\n"
+                if v.get('layout'):
+                    layout = v['layout']
+                    result += f"     Position: ({layout.get('x', 0)}, {layout.get('y', 0)})\n"
+                    result += f"     Size: {layout.get('width', 0)} x {layout.get('height', 0)}\n"
+                result += "\n"
+
+            return result
+
+        except Exception as e:
+            logger.error(f"Get page visuals error: {e}")
+            return f"Error getting page visuals: {str(e)}"
+
+    # ==================== PBIP VISUAL/REPORT EDITING HANDLERS ====================
+
+    async def _handle_pbip_get_visual_details(self, args: Dict[str, Any]) -> str:
+        """Get detailed info about a specific visual"""
+        try:
+            connector = self._get_pbip_connector()
+
+            if not connector.current_project:
+                return "No PBIP project loaded. Use 'pbip_load_project' first."
+
+            page_name = args.get("page_name")
+            visual_id = args.get("visual_id")
+
+            if not page_name or not visual_id:
+                return "Error: page_name and visual_id are required"
+
+            # Get visual details
+            get_fn = lambda: connector.get_visual_details(page_name, visual_id)
+            result = await asyncio.get_event_loop().run_in_executor(None, get_fn)
+
+            if result.get("error"):
+                return f"Error: {result['error']}"
+
+            response = f"=== Visual Details ===\n\n"
+            response += f"Page: {result.get('page_name', 'N/A')}\n"
+            response += f"Visual ID: {result.get('visual_id', 'N/A')}\n"
+            response += f"Visual Name: {result.get('visual_name', 'N/A')}\n"
+            response += f"Visual Type: {result.get('visual_type', 'Unknown')}\n"
+
+            if result.get("file_path"):
+                response += f"File: {result['file_path']}\n"
+
+            response += "\n"
+
+            # Position
+            if result.get("position"):
+                pos = result["position"]
+                response += "--- Position & Size ---\n"
+                response += f"  X: {pos.get('x', 0)}, Y: {pos.get('y', 0)}\n"
+                response += f"  Width: {pos.get('width', 0)}, Height: {pos.get('height', 0)}\n\n"
+
+            # Data sources
+            if result.get("data_sources"):
+                response += f"--- Data Sources ({len(result['data_sources'])}) ---\n"
+                for src in result["data_sources"]:
+                    response += f"  • Entity: {src.get('entity', 'N/A')} (alias: {src.get('name', '')})\n"
+                response += "\n"
+
+            # Data fields
+            if result.get("data_fields"):
+                response += f"--- Data Fields ({len(result['data_fields'])}) ---\n"
+                for field in result["data_fields"]:
+                    field_type = field.get("type", "Unknown")
+                    prop = field.get("property", "")
+                    name = field.get("name", "")
+                    response += f"  • [{field_type}] {prop}"
+                    if name:
+                        response += f" ({name})"
+                    response += "\n"
+                response += "\n"
+
+            # Filters
+            if result.get("has_filters"):
+                response += f"--- Filters ---\n"
+                response += f"  Active filters: {result.get('filter_count', 0)}\n\n"
+
+            response += "\n💡 Use 'pbip_update_visual' to modify this visual's properties.\n"
+
+            return response
+
+        except Exception as e:
+            logger.error(f"PBIP get visual details error: {e}")
+            return f"Error: {str(e)}"
+
+    async def _handle_pbip_add_page(self, args: Dict[str, Any]) -> str:
+        """Add a new page to the PBIP report"""
+        try:
+            connector = self._get_pbip_connector()
+
+            if not connector.current_project:
+                return "No PBIP project loaded. Use 'pbip_load_project' first."
+
+            display_name = args.get("display_name")
+            width = args.get("width", 1280)
+            height = args.get("height", 720)
+
+            if not display_name:
+                return "Error: display_name is required"
+
+            add_fn = lambda: connector.add_page(display_name, width, height)
+            result = await asyncio.get_event_loop().run_in_executor(None, add_fn)
+
+            if result.get("error"):
+                return f"Error: {result['error']}"
+
+            response = "=== Page Added Successfully ===\n\n"
+            response += f"Page Name: {result.get('display_name', 'N/A')}\n"
+            response += f"Page ID: {result.get('page_id', 'N/A')}\n"
+            response += f"Size: {result.get('width', 0)} x {result.get('height', 0)}\n"
+
+            if result.get("page_folder"):
+                response += f"Folder: {result['page_folder']}\n"
+
+            response += "\nNext steps:\n"
+            response += "  1. Use 'pbip_add_visual' to add visuals to this page\n"
+            response += "  2. Reopen in Power BI Desktop to see the new page\n"
+
+            return response
+
+        except Exception as e:
+            logger.error(f"PBIP add page error: {e}")
+            return f"Error: {str(e)}"
+
+    async def _handle_pbip_delete_page(self, args: Dict[str, Any]) -> str:
+        """Delete a page from the PBIP report"""
+        try:
+            connector = self._get_pbip_connector()
+
+            if not connector.current_project:
+                return "No PBIP project loaded. Use 'pbip_load_project' first."
+
+            page_name = args.get("page_name")
+
+            if not page_name:
+                return "Error: page_name is required"
+
+            delete_fn = lambda: connector.delete_page(page_name)
+            result = await asyncio.get_event_loop().run_in_executor(None, delete_fn)
+
+            if result.get("error"):
+                return f"Error: {result['error']}"
+
+            response = "=== Page Deleted Successfully ===\n\n"
+            response += f"Deleted: {result.get('deleted_page', 'N/A')}\n"
+
+            if result.get("deleted_folder"):
+                response += f"Removed folder: {result['deleted_folder']}\n"
+
+            response += "\nReopen in Power BI Desktop to see the changes.\n"
+
+            return response
+
+        except Exception as e:
+            logger.error(f"PBIP delete page error: {e}")
+            return f"Error: {str(e)}"
+
+    async def _handle_pbip_add_visual(self, args: Dict[str, Any]) -> str:
+        """Add a new visual to a page"""
+        try:
+            connector = self._get_pbip_connector()
+
+            if not connector.current_project:
+                return "No PBIP project loaded. Use 'pbip_load_project' first."
+
+            page_name = args.get("page_name")
+            visual_type = args.get("visual_type")
+            x = args.get("x", 0)
+            y = args.get("y", 0)
+            width = args.get("width", 400)
+            height = args.get("height", 300)
+            table_name = args.get("table_name", "")
+            column_name = args.get("column_name", "")
+            measure_name = args.get("measure_name", "")
+
+            if not page_name or not visual_type:
+                return "Error: page_name and visual_type are required"
+
+            add_fn = lambda: connector.add_visual(
+                page_name, visual_type,
+                x=x, y=y, width=width, height=height,
+                table_name=table_name, column_name=column_name,
+                measure_name=measure_name
+            )
+            result = await asyncio.get_event_loop().run_in_executor(None, add_fn)
+
+            if result.get("error"):
+                return f"Error: {result['error']}"
+
+            response = "=== Visual Added Successfully ===\n\n"
+            response += f"Visual Type: {result.get('visual_type', 'N/A')}\n"
+            response += f"Visual ID: {result.get('visual_id', 'N/A')}\n"
+            response += f"Page: {result.get('page_name', 'N/A')}\n"
+
+            pos = result.get("position", {})
+            response += f"Position: ({pos.get('x', 0)}, {pos.get('y', 0)})\n"
+            response += f"Size: {pos.get('width', 0)} x {pos.get('height', 0)}\n"
+
+            if table_name:
+                response += f"\nData Binding: {table_name}"
+                if column_name:
+                    response += f"[{column_name}]"
+                if measure_name:
+                    response += f" + measure '{measure_name}'"
+                response += "\n"
+
+            if result.get("file_path"):
+                response += f"\nFile: {result['file_path']}\n"
+
+            response += "\nNext steps:\n"
+            response += "  1. Use 'pbip_update_visual' to modify this visual's properties\n"
+            response += "  2. Reopen in Power BI Desktop to see the new visual\n"
+
+            return response
+
+        except Exception as e:
+            logger.error(f"PBIP add visual error: {e}")
+            return f"Error: {str(e)}"
+
+    async def _handle_pbip_update_visual(self, args: Dict[str, Any]) -> str:
+        """Update an existing visual's properties"""
+        try:
+            connector = self._get_pbip_connector()
+
+            if not connector.current_project:
+                return "No PBIP project loaded. Use 'pbip_load_project' first."
+
+            page_name = args.get("page_name")
+            visual_id = args.get("visual_id")
+
+            if not page_name or not visual_id:
+                return "Error: page_name and visual_id are required"
+
+            update_fn = lambda: connector.update_visual(
+                page_name, visual_id,
+                visual_type=args.get("visual_type"),
+                x=args.get("x"),
+                y=args.get("y"),
+                width=args.get("width"),
+                height=args.get("height"),
+                table_name=args.get("table_name"),
+                column_name=args.get("column_name"),
+                measure_name=args.get("measure_name"),
+            )
+            result = await asyncio.get_event_loop().run_in_executor(None, update_fn)
+
+            if result.get("error"):
+                return f"Error: {result['error']}"
+
+            response = "=== Visual Updated Successfully ===\n\n"
+            response += f"Visual ID: {result.get('visual_id', 'N/A')}\n"
+            response += f"Page: {result.get('page_name', 'N/A')}\n\n"
+
+            changes = result.get("changes", [])
+            if changes:
+                response += "--- Changes Applied ---\n"
+                for change in changes:
+                    response += f"  ✅ {change}\n"
+            else:
+                response += "No changes were applied (no properties specified).\n"
+
+            if result.get("file_path"):
+                response += f"\nFile: {result['file_path']}\n"
+
+            response += "\nReopen in Power BI Desktop to see the changes.\n"
+
+            return response
+
+        except Exception as e:
+            logger.error(f"PBIP update visual error: {e}")
+            return f"Error: {str(e)}"
+
+    async def _handle_pbip_delete_visual(self, args: Dict[str, Any]) -> str:
+        """Delete a visual from a page"""
+        try:
+            connector = self._get_pbip_connector()
+
+            if not connector.current_project:
+                return "No PBIP project loaded. Use 'pbip_load_project' first."
+
+            page_name = args.get("page_name")
+            visual_id = args.get("visual_id")
+
+            if not page_name or not visual_id:
+                return "Error: page_name and visual_id are required"
+
+            delete_fn = lambda: connector.delete_visual(page_name, visual_id)
+            result = await asyncio.get_event_loop().run_in_executor(None, delete_fn)
+
+            if result.get("error"):
+                return f"Error: {result['error']}"
+
+            response = "=== Visual Deleted Successfully ===\n\n"
+            response += f"Deleted Visual: {result.get('deleted_visual_id', 'N/A')}\n"
+            response += f"From Page: {result.get('page_name', 'N/A')}\n"
+            response += "\nReopen in Power BI Desktop to see the changes.\n"
+
+            return response
+
+        except Exception as e:
+            logger.error(f"PBIP delete visual error: {e}")
+            return f"Error: {str(e)}"
+
+    # ==================== UTILITY HANDLERS ====================
+
+    async def _handle_check_tool(self, args: Dict[str, Any]) -> str:
+        """Add numbers together"""
+        try:
+            numbers = args.get("numbers", [])
+
+            if not numbers:
+                return "Error: numbers list is required and cannot be empty"
+
+            if not isinstance(numbers, list):
+                return "Error: numbers must be a list"
+
+            # Validate all items are numbers
+            try:
+                numeric_values = [float(n) for n in numbers]
+            except (ValueError, TypeError):
+                return "Error: All items in numbers list must be numeric values"
+
+            # Calculate sum
+            total = sum(numeric_values)
+
+            # Build result
+            result = f"Numbers: {numbers}\n"
+            result += f"Sum: {total}\n"
+            result += f"Count: {len(numbers)}\n"
+            result += f"Average: {total / len(numbers):.2f}\n"
+            result += f"Min: {min(numeric_values)}\n"
+            result += f"Max: {max(numeric_values)}"
+
+            logger.info(f"Check tool executed: {numbers} -> sum={total}")
+            return result
+
+        except Exception as e:
+            logger.error(f"Check tool error: {e}")
+            return f"Error in check_tool: {str(e)}"
+
+    def _run_device_flow_auth(self):
+        """Run device flow authentication in a background thread.
+
+        Sets self._device_flow_ready Event when complete (success or fail).
+        """
+        try:
+            sys.stderr.write("\n🔐 Device Flow authentication starting in background...\n")
+            sys.stderr.flush()
+
+            rest = PowerBIRestConnector(
+                self.tenant_id, self.client_id,
+                auth_mode="device_flow"
+            )
+
+            success = rest.authenticate()
+
+            if success:
+                self._device_flow_token = rest.access_token
+                self.rest_connector = rest
+                self._device_flow_success = True
+                sys.stderr.write("✅ Device Flow authenticated — cloud tools are now available\n\n")
+            else:
+                self._device_flow_success = False
+                sys.stderr.write("⚠️ Device Flow authentication failed — cloud tools unavailable\n\n")
+
+            sys.stderr.flush()
+
+        except Exception as e:
+            logger.error(f"Device flow background auth error: {e}")
+            self._device_flow_success = False
+        finally:
+            self._device_flow_ready.set()
+
     async def run(self):
         """Run the MCP server"""
+        # If device flow is configured, start auth in a BACKGROUND THREAD
+        # so the MCP server can respond to initialize immediately
+        if self.cloud_auth_mode == "device_flow":
+            auth_thread = threading.Thread(
+                target=self._run_device_flow_auth,
+                name="device-flow-auth",
+                daemon=True,
+            )
+            auth_thread.start()
+            logger.info("Device flow auth started in background thread")
+
         async with stdio_server() as (read_stream, write_stream):
             logger.info("Power BI MCP Server V2 starting...")
             logger.info("Supports: Power BI Desktop (local) + Power BI Service (cloud)")
+            if self.cloud_auth_mode == "device_flow":
+                logger.info("Auth: Device Flow (check server logs for login instructions)")
             await self.server.run(
                 read_stream,
                 write_stream,

@@ -463,6 +463,204 @@ class PowerBIPBIPConnector:
             "pbir_definition_folder": str(self.current_project.pbir_definition_folder) if self.current_project.pbir_definition_folder else None
         }
 
+    # ==================== LIST VISUALS ====================
+
+    def list_visuals(self) -> Dict[str, Any]:
+        """
+        List all visuals in the loaded PBIP project.
+
+        Supports both report formats:
+        - PBIR-Legacy: Single report.json with all visuals
+        - PBIR-Enhanced: Individual visual.json files organized by pages
+
+        Returns:
+            Dict with visual information by page/section
+        """
+        if not self.current_project:
+            return {"error": "No project loaded", "visuals": []}
+
+        visuals = []
+
+        try:
+            if self.current_project.is_pbir_enhanced:
+                # PBIR-Enhanced: Extract from visual.json files
+                visuals = self._list_visuals_from_pbir_enhanced()
+            elif self.current_project.report_json_path:
+                # PBIR-Legacy: Extract from single report.json
+                visuals = self._list_visuals_from_pbir_legacy()
+        except Exception as e:
+            logger.error(f"Error listing visuals: {e}")
+            return {"error": str(e), "visuals": []}
+
+        return {
+            "success": True,
+            "format": "PBIR-Enhanced" if self.current_project.is_pbir_enhanced else "PBIR-Legacy",
+            "total_visuals": len(visuals),
+            "visuals": visuals
+        }
+
+    def _list_visuals_from_pbir_enhanced(self) -> List[Dict[str, Any]]:
+        """Extract visuals from PBIR-Enhanced format (individual visual.json files)"""
+        visuals = []
+
+        if not self.current_project or not self.current_project.pbir_definition_folder:
+            return visuals
+
+        try:
+            pages_folder = self.current_project.pbir_definition_folder / "pages"
+            if not pages_folder.exists():
+                return visuals
+
+            # List all pages
+            for page_folder in sorted(pages_folder.iterdir()):
+                if not page_folder.is_dir():
+                    continue
+
+                page_id = page_folder.name
+                page_json = page_folder / "page.json"
+                page_name = page_id  # Default to ID
+
+                # Get page name from page.json if available
+                if page_json.exists():
+                    try:
+                        with open(page_json, 'r', encoding='utf-8') as f:
+                            page_data = json.load(f)
+                            page_name = page_data.get("name", page_name)
+                            page_name = page_data.get("displayName", page_name)
+                    except Exception:
+                        pass
+
+                # List all visuals in this page
+                visuals_folder = page_folder / "visuals"
+                if visuals_folder.exists():
+                    for visual_folder in sorted(visuals_folder.iterdir()):
+                        if not visual_folder.is_dir():
+                            continue
+
+                        visual_id = visual_folder.name
+                        visual_json = visual_folder / "visual.json"
+
+                        if visual_json.exists():
+                            visual_info = {
+                                "page_id": page_id,
+                                "page_name": page_name,
+                                "visual_id": visual_id,
+                                "visual_name": visual_id,  # Default to ID
+                                "type": "Unknown",
+                                "config": {}
+                            }
+
+                            # Parse visual.json for more details
+                            try:
+                                with open(visual_json, 'r', encoding='utf-8') as f:
+                                    visual_data = json.load(f)
+
+                                    # Extract visual name
+                                    if "config" in visual_data:
+                                        config = visual_data["config"]
+                                        visual_info["visual_name"] = config.get("name", visual_id)
+                                        visual_info["type"] = config.get("visualType", "Unknown")
+
+                                        # Extract key properties
+                                        if "layouts" in config:
+                                            layouts = config["layouts"]
+                                            if layouts and len(layouts) > 0:
+                                                visual_info["dimensions"] = {
+                                                    "width": layouts[0].get("width", 0),
+                                                    "height": layouts[0].get("height", 0),
+                                                    "x": layouts[0].get("x", 0),
+                                                    "y": layouts[0].get("y", 0)
+                                                }
+
+                                        # Extract data bindings
+                                        if "objects" in config:
+                                            visual_info["has_bindings"] = True
+                                            visual_info["binding_count"] = len(config["objects"])
+
+                                    # Extract source Entity (table reference)
+                                    if "config" in visual_data and "prototypeQuery" in visual_data["config"]:
+                                        prototype = visual_data["config"]["prototypeQuery"]
+                                        if "Where" in prototype:  # DAX queries
+                                            visual_info["uses_filters"] = True
+                                        if "From" in prototype:
+                                            visual_info["from_source"] = prototype["From"]
+
+                            except (json.JSONDecodeError, KeyError) as e:
+                                logger.warning(f"Could not fully parse visual {visual_id}: {e}")
+
+                            visuals.append(visual_info)
+
+        except Exception as e:
+            logger.error(f"Error listing PBIR-Enhanced visuals: {e}")
+
+        return visuals
+
+    def _list_visuals_from_pbir_legacy(self) -> List[Dict[str, Any]]:
+        """Extract visuals from PBIR-Legacy format (single report.json)"""
+        visuals = []
+
+        if not self.current_project or not self.current_project.report_json_path:
+            return visuals
+
+        try:
+            with open(self.current_project.report_json_path, 'r', encoding='utf-8') as f:
+                report_data = json.load(f)
+
+            # Extract sections (pages) from report
+            sections = report_data.get("sections", [])
+
+            for section in sections:
+                section_id = section.get("name", "Unknown")
+                section_name = section.get("displayName", section_id)
+
+                # List visuals in this section
+                visual_containers = section.get("visualContainers", [])
+
+                for visual_container in visual_containers:
+                    visual_config = visual_container.get("config", {})
+                    visual_name = visual_config.get("name", "Unnamed Visual")
+                    visual_type = visual_config.get("visualType", "Unknown")
+
+                    visual_info = {
+                        "page_id": section_id,
+                        "page_name": section_name,
+                        "visual_name": visual_name,
+                        "visual_id": visual_container.get("name", "unknown_id"),
+                        "type": visual_type,
+                        "config": visual_config.get("query", {})
+                    }
+
+                    # Extract dimensions
+                    if "layouts" in visual_config:
+                        layouts = visual_config["layouts"]
+                        if layouts and len(layouts) > 0:
+                            visual_info["dimensions"] = {
+                                "width": layouts[0].get("width", 0),
+                                "height": layouts[0].get("height", 0),
+                                "x": layouts[0].get("x", 0),
+                                "y": layouts[0].get("y", 0)
+                            }
+
+                    # Extract binding/entity info
+                    if "objects" in visual_config and visual_config["objects"]:
+                        objects = visual_config["objects"]
+                        visual_info["has_bindings"] = True
+                        visual_info["binding_count"] = len(objects)
+
+                        # Try to find Entity references
+                        if "dataRoles" in objects:
+                            virtual_roles = objects["dataRoles"]
+                            for role in virtual_roles:
+                                if "queryName" in role:
+                                    visual_info["query_name"] = role["queryName"]
+
+                    visuals.append(visual_info)
+
+        except (json.JSONDecodeError, KeyError) as e:
+            logger.error(f"Error listing PBIR-Legacy visuals: {e}")
+
+        return visuals
+
     # ==================== BACKUP & ROLLBACK ====================
 
     def create_backup(self) -> Optional[str]:
@@ -2100,3 +2298,1127 @@ class PowerBIPBIPConnector:
             details={"individual_results": [r.__dict__ for r in results]},
             backup_created=backup_path
         )
+
+    # ==================== VISUAL / REPORT MANIPULATION ====================
+
+    def get_visual_details(self, page_name: str, visual_id: str) -> Dict[str, Any]:
+        """
+        Get detailed information about a specific visual including data bindings,
+        filters, formatting, and configuration.
+
+        Works with both PBIR-Enhanced and PBIR-Legacy formats.
+
+        Args:
+            page_name: Display name or ID of the page containing the visual
+            visual_id: ID or name of the visual
+
+        Returns:
+            Dict with detailed visual information
+        """
+        if not self.current_project:
+            return {"error": "No project loaded"}
+
+        try:
+            if self.current_project.is_pbir_enhanced:
+                return self._get_visual_details_pbir_enhanced(page_name, visual_id)
+            elif self.current_project.report_json_path:
+                return self._get_visual_details_pbir_legacy(page_name, visual_id)
+            else:
+                return {"error": "No report found in project"}
+        except Exception as e:
+            logger.error(f"Error getting visual details: {e}")
+            return {"error": str(e)}
+
+    def _get_visual_details_pbir_enhanced(self, page_name: str, visual_id: str) -> Dict[str, Any]:
+        """Get detailed visual info from PBIR-Enhanced format"""
+        if not self.current_project or not self.current_project.pbir_definition_folder:
+            return {"error": "No PBIR definition folder found"}
+
+        pages_folder = self.current_project.pbir_definition_folder / "pages"
+        if not pages_folder.exists():
+            return {"error": "No pages folder found"}
+
+        # Find the page by name or ID
+        target_page_folder = None
+        target_page_name = page_name
+
+        for page_folder in pages_folder.iterdir():
+            if not page_folder.is_dir():
+                continue
+
+            # Match by folder name (ID)
+            if page_folder.name == page_name:
+                target_page_folder = page_folder
+                break
+
+            # Match by displayName from page.json
+            page_json_path = page_folder / "page.json"
+            if page_json_path.exists():
+                try:
+                    with open(page_json_path, 'r', encoding='utf-8') as f:
+                        page_data = json.load(f)
+                    display_name = page_data.get("displayName", page_data.get("name", ""))
+                    if display_name.lower() == page_name.lower():
+                        target_page_folder = page_folder
+                        target_page_name = display_name
+                        break
+                except Exception:
+                    pass
+
+        if not target_page_folder:
+            return {"error": f"Page '{page_name}' not found"}
+
+        # Find the visual
+        visuals_folder = target_page_folder / "visuals"
+        if not visuals_folder.exists():
+            return {"error": f"No visuals folder found in page '{page_name}'"}
+
+        target_visual_path = None
+        for vf in visuals_folder.iterdir():
+            if not vf.is_dir():
+                continue
+            if vf.name == visual_id:
+                target_visual_path = vf / "visual.json"
+                break
+
+            # Also try matching by visual name inside visual.json
+            vj = vf / "visual.json"
+            if vj.exists():
+                try:
+                    with open(vj, 'r', encoding='utf-8') as f:
+                        vdata = json.load(f)
+                    vname = vdata.get("config", {}).get("name", "")
+                    if vname == visual_id:
+                        target_visual_path = vj
+                        visual_id = vf.name
+                        break
+                except Exception:
+                    pass
+
+        if not target_visual_path or not target_visual_path.exists():
+            return {"error": f"Visual '{visual_id}' not found on page '{page_name}'"}
+
+        # Parse the full visual.json
+        with open(target_visual_path, 'r', encoding='utf-8') as f:
+            visual_data = json.load(f)
+
+        result = {
+            "success": True,
+            "page_name": target_page_name,
+            "visual_id": visual_id,
+            "file_path": str(target_visual_path),
+            "raw_config": visual_data,
+        }
+
+        # Extract structured info
+        config = visual_data.get("config", {})
+        result["visual_name"] = config.get("name", visual_id)
+        result["visual_type"] = config.get("visualType", "Unknown")
+
+        # Layouts / positioning
+        layouts = config.get("layouts", [])
+        if layouts:
+            layout = layouts[0]
+            result["position"] = {
+                "x": layout.get("x", 0),
+                "y": layout.get("y", 0),
+                "width": layout.get("width", 0),
+                "height": layout.get("height", 0),
+                "z": layout.get("z", 0),
+            }
+
+        # Data bindings - extract from prototypeQuery
+        prototype = config.get("prototypeQuery", {})
+        if prototype:
+            from_sources = prototype.get("From", [])
+            select_items = prototype.get("Select", [])
+            where_items = prototype.get("Where", [])
+
+            result["data_sources"] = []
+            for src in from_sources:
+                result["data_sources"].append({
+                    "name": src.get("Name", ""),
+                    "entity": src.get("Entity", ""),
+                    "type": src.get("Type", ""),
+                })
+
+            result["data_fields"] = []
+            for sel in select_items:
+                field_info = {}
+                if "Column" in sel:
+                    col = sel["Column"]
+                    field_info = {
+                        "type": "Column",
+                        "expression": col.get("Expression", {}).get("SourceRef", {}).get("Source", ""),
+                        "property": col.get("Property", ""),
+                    }
+                elif "Measure" in sel:
+                    mea = sel["Measure"]
+                    field_info = {
+                        "type": "Measure",
+                        "expression": mea.get("Expression", {}).get("SourceRef", {}).get("Source", ""),
+                        "property": mea.get("Property", ""),
+                    }
+                elif "Aggregation" in sel:
+                    agg = sel["Aggregation"]
+                    field_info = {
+                        "type": "Aggregation",
+                        "function": agg.get("Function", ""),
+                    }
+                if field_info:
+                    if "Name" in sel:
+                        field_info["name"] = sel["Name"]
+                    result["data_fields"].append(field_info)
+
+            result["has_filters"] = len(where_items) > 0
+            result["filter_count"] = len(where_items)
+
+        # Visual-level filters
+        if "filters" in visual_data:
+            result["visual_filters"] = visual_data["filters"]
+
+        return result
+
+    def _get_visual_details_pbir_legacy(self, page_name: str, visual_id: str) -> Dict[str, Any]:
+        """Get detailed visual info from PBIR-Legacy format"""
+        if not self.current_project or not self.current_project.report_json_path:
+            return {"error": "No report.json found"}
+
+        with open(self.current_project.report_json_path, 'r', encoding='utf-8') as f:
+            report_data = json.load(f)
+
+        sections = report_data.get("sections", [])
+
+        # Find the target section/page
+        target_section = None
+        for section in sections:
+            display_name = section.get("displayName", section.get("name", ""))
+            if display_name.lower() == page_name.lower() or section.get("name", "") == page_name:
+                target_section = section
+                break
+
+        if not target_section:
+            return {"error": f"Page '{page_name}' not found"}
+
+        # Find the visual
+        visual_containers = target_section.get("visualContainers", [])
+        target_visual = None
+
+        for vc in visual_containers:
+            vc_config = vc.get("config", {})
+            vc_name = vc_config.get("name", "")
+            if vc_name == visual_id or vc.get("name", "") == visual_id:
+                target_visual = vc
+                break
+
+        if not target_visual:
+            return {"error": f"Visual '{visual_id}' not found on page '{page_name}'"}
+
+        config = target_visual.get("config", {})
+
+        result = {
+            "success": True,
+            "page_name": target_section.get("displayName", page_name),
+            "visual_id": config.get("name", visual_id),
+            "visual_name": config.get("name", visual_id),
+            "visual_type": config.get("visualType", "Unknown"),
+            "raw_config": target_visual,
+        }
+
+        # Layouts / positioning
+        layouts = config.get("layouts", [])
+        if layouts:
+            layout = layouts[0]
+            result["position"] = {
+                "x": layout.get("x", 0),
+                "y": layout.get("y", 0),
+                "width": layout.get("width", 0),
+                "height": layout.get("height", 0),
+                "z": layout.get("z", 0),
+            }
+
+        # Query / data bindings
+        query = config.get("query", {})
+        if query:
+            result["query"] = query
+
+        # Data roles
+        result["data_roles"] = config.get("dataRoles", [])
+
+        # Filters
+        if "filters" in target_visual:
+            result["visual_filters"] = target_visual["filters"]
+
+        return result
+
+    def add_page(self, display_name: str, width: int = 1280, height: int = 720) -> Dict[str, Any]:
+        """
+        Add a new page to the report.
+
+        Supports both PBIR-Enhanced and PBIR-Legacy formats.
+
+        Args:
+            display_name: Display name for the new page
+            width: Page width in pixels (default: 1280)
+            height: Page height in pixels (default: 720)
+
+        Returns:
+            Dict with page creation result
+        """
+        if not self.current_project:
+            return {"error": "No project loaded"}
+
+        try:
+            if self.current_project.is_pbir_enhanced:
+                return self._add_page_pbir_enhanced(display_name, width, height)
+            elif self.current_project.report_json_path:
+                return self._add_page_pbir_legacy(display_name, width, height)
+            else:
+                return {"error": "No report found in project"}
+        except Exception as e:
+            logger.error(f"Error adding page: {e}")
+            return {"error": str(e)}
+
+    def _add_page_pbir_enhanced(self, display_name: str, width: int, height: int) -> Dict[str, Any]:
+        """Add a page in PBIR-Enhanced format"""
+        import uuid
+
+        if not self.current_project or not self.current_project.pbir_definition_folder:
+            return {"error": "No PBIR definition folder found"}
+
+        pages_folder = self.current_project.pbir_definition_folder / "pages"
+        pages_folder.mkdir(parents=True, exist_ok=True)
+
+        # Generate a unique page ID
+        page_id = str(uuid.uuid4()).replace("-", "")[:20]
+
+        # Create page folder and visuals subfolder
+        page_folder = pages_folder / page_id
+        page_folder.mkdir(parents=True, exist_ok=True)
+        visuals_folder = page_folder / "visuals"
+        visuals_folder.mkdir(parents=True, exist_ok=True)
+
+        # Create page.json
+        page_data = {
+            "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/page/1.0.0/schema.json",
+            "name": page_id,
+            "displayName": display_name,
+            "displayOption": "FitToPage",
+            "height": height,
+            "width": width,
+        }
+
+        page_json_path = page_folder / "page.json"
+        with open(page_json_path, 'w', encoding='utf-8') as f:
+            json.dump(page_data, f, indent=2, ensure_ascii=False)
+
+        logger.info(f"Created new page '{display_name}' with ID '{page_id}'")
+
+        return {
+            "success": True,
+            "page_id": page_id,
+            "display_name": display_name,
+            "page_folder": str(page_folder),
+            "width": width,
+            "height": height,
+        }
+
+    def _add_page_pbir_legacy(self, display_name: str, width: int, height: int) -> Dict[str, Any]:
+        """Add a page in PBIR-Legacy format"""
+        import uuid
+
+        if not self.current_project or not self.current_project.report_json_path:
+            return {"error": "No report.json found"}
+
+        self._cache_file_content(self.current_project.report_json_path)
+
+        with open(self.current_project.report_json_path, 'r', encoding='utf-8') as f:
+            report_data = json.load(f)
+
+        sections = report_data.get("sections", [])
+        page_id = f"Section_{str(uuid.uuid4()).replace('-', '')[:16]}"
+
+        # Determine order (add at end)
+        max_order = max((s.get("ordinal", 0) for s in sections), default=-1) + 1
+
+        new_section = {
+            "name": page_id,
+            "displayName": display_name,
+            "displayOption": 1,  # Fit to page
+            "width": width,
+            "height": height,
+            "ordinal": max_order,
+            "visualContainers": [],
+        }
+
+        sections.append(new_section)
+        report_data["sections"] = sections
+
+        with open(self.current_project.report_json_path, 'w', encoding='utf-8') as f:
+            json.dump(report_data, f, indent=2, ensure_ascii=False)
+
+        logger.info(f"Created new page '{display_name}' with ID '{page_id}'")
+
+        return {
+            "success": True,
+            "page_id": page_id,
+            "display_name": display_name,
+            "width": width,
+            "height": height,
+        }
+
+    def delete_page(self, page_name: str) -> Dict[str, Any]:
+        """
+        Delete a page from the report.
+
+        Args:
+            page_name: Display name or ID of the page to delete
+
+        Returns:
+            Dict with deletion result
+        """
+        if not self.current_project:
+            return {"error": "No project loaded"}
+
+        try:
+            if self.current_project.is_pbir_enhanced:
+                return self._delete_page_pbir_enhanced(page_name)
+            elif self.current_project.report_json_path:
+                return self._delete_page_pbir_legacy(page_name)
+            else:
+                return {"error": "No report found in project"}
+        except Exception as e:
+            logger.error(f"Error deleting page: {e}")
+            return {"error": str(e)}
+
+    def _delete_page_pbir_enhanced(self, page_name: str) -> Dict[str, Any]:
+        """Delete a page in PBIR-Enhanced format"""
+        if not self.current_project or not self.current_project.pbir_definition_folder:
+            return {"error": "No PBIR definition folder found"}
+
+        pages_folder = self.current_project.pbir_definition_folder / "pages"
+        if not pages_folder.exists():
+            return {"error": "No pages folder found"}
+
+        target_folder = None
+        target_display_name = page_name
+
+        for page_folder in pages_folder.iterdir():
+            if not page_folder.is_dir():
+                continue
+
+            if page_folder.name == page_name:
+                target_folder = page_folder
+                break
+
+            page_json_path = page_folder / "page.json"
+            if page_json_path.exists():
+                try:
+                    with open(page_json_path, 'r', encoding='utf-8') as f:
+                        page_data = json.load(f)
+                    dn = page_data.get("displayName", page_data.get("name", ""))
+                    if dn.lower() == page_name.lower():
+                        target_folder = page_folder
+                        target_display_name = dn
+                        break
+                except Exception:
+                    pass
+
+        if not target_folder:
+            return {"error": f"Page '{page_name}' not found"}
+
+        # Remove the entire page folder (including all visuals)
+        shutil.rmtree(target_folder)
+
+        # Remove from visual_json_files cache
+        self.current_project.visual_json_files = [
+            v for v in self.current_project.visual_json_files
+            if not str(v).startswith(str(target_folder))
+        ]
+
+        logger.info(f"Deleted page '{target_display_name}'")
+
+        return {
+            "success": True,
+            "deleted_page": target_display_name,
+            "deleted_folder": str(target_folder),
+        }
+
+    def _delete_page_pbir_legacy(self, page_name: str) -> Dict[str, Any]:
+        """Delete a page in PBIR-Legacy format"""
+        if not self.current_project or not self.current_project.report_json_path:
+            return {"error": "No report.json found"}
+
+        self._cache_file_content(self.current_project.report_json_path)
+
+        with open(self.current_project.report_json_path, 'r', encoding='utf-8') as f:
+            report_data = json.load(f)
+
+        sections = report_data.get("sections", [])
+        target_idx = None
+        deleted_name = page_name
+
+        for i, section in enumerate(sections):
+            dn = section.get("displayName", section.get("name", ""))
+            if dn.lower() == page_name.lower() or section.get("name", "") == page_name:
+                target_idx = i
+                deleted_name = dn
+                break
+
+        if target_idx is None:
+            return {"error": f"Page '{page_name}' not found"}
+
+        sections.pop(target_idx)
+        report_data["sections"] = sections
+
+        with open(self.current_project.report_json_path, 'w', encoding='utf-8') as f:
+            json.dump(report_data, f, indent=2, ensure_ascii=False)
+
+        logger.info(f"Deleted page '{deleted_name}'")
+
+        return {
+            "success": True,
+            "deleted_page": deleted_name,
+        }
+
+    def add_visual(self, page_name: str, visual_type: str,
+                   x: int = 0, y: int = 0, width: int = 400, height: int = 300,
+                   table_name: str = "", column_name: str = "",
+                   measure_name: str = "") -> Dict[str, Any]:
+        """
+        Add a new visual to a page.
+
+        Supports both PBIR-Enhanced and PBIR-Legacy formats.
+
+        Args:
+            page_name: Display name or ID of the target page
+            visual_type: Type of visual (e.g., "barChart", "lineChart", "tableEx",
+                         "card", "slicer", "pieChart", "donutChart", "clusteredBarChart",
+                         "clusteredColumnChart", "lineClusteredColumnComboChart",
+                         "areaChart", "filledMap", "map", "treemap", "waterfallChart",
+                         "funnel", "gauge", "multiRowCard", "kpi", "textbox", "image",
+                         "shape", "actionButton")
+            x: X position on canvas (default: 0)
+            y: Y position on canvas (default: 0)
+            width: Width in pixels (default: 400)
+            height: Height in pixels (default: 300)
+            table_name: Optional table name to bind data from
+            column_name: Optional column name to bind (requires table_name)
+            measure_name: Optional measure name to bind (requires table_name)
+
+        Returns:
+            Dict with visual creation result
+        """
+        if not self.current_project:
+            return {"error": "No project loaded"}
+
+        try:
+            if self.current_project.is_pbir_enhanced:
+                return self._add_visual_pbir_enhanced(
+                    page_name, visual_type, x, y, width, height,
+                    table_name, column_name, measure_name
+                )
+            elif self.current_project.report_json_path:
+                return self._add_visual_pbir_legacy(
+                    page_name, visual_type, x, y, width, height,
+                    table_name, column_name, measure_name
+                )
+            else:
+                return {"error": "No report found in project"}
+        except Exception as e:
+            logger.error(f"Error adding visual: {e}")
+            return {"error": str(e)}
+
+    def _build_visual_config(self, visual_id: str, visual_type: str,
+                             x: int, y: int, width: int, height: int,
+                             table_name: str = "", column_name: str = "",
+                             measure_name: str = "") -> Dict[str, Any]:
+        """Build a visual config dict for both PBIR formats"""
+        config = {
+            "name": visual_id,
+            "visualType": visual_type,
+            "layouts": [
+                {
+                    "x": x,
+                    "y": y,
+                    "width": width,
+                    "height": height,
+                    "z": 0,
+                }
+            ],
+            "singleVisual": {
+                "visualType": visual_type,
+                "projections": {},
+                "objects": {},
+            },
+        }
+
+        # Add data bindings if table/column/measure are specified
+        if table_name:
+            source_alias = table_name[0].lower() if table_name else "t"
+
+            from_clause = [{
+                "Name": source_alias,
+                "Entity": table_name,
+                "Type": 0,
+            }]
+
+            select_clause = []
+
+            if column_name:
+                select_clause.append({
+                    "Column": {
+                        "Expression": {"SourceRef": {"Source": source_alias}},
+                        "Property": column_name,
+                    },
+                    "Name": f"{table_name}.{column_name}",
+                })
+
+            if measure_name:
+                select_clause.append({
+                    "Measure": {
+                        "Expression": {"SourceRef": {"Source": source_alias}},
+                        "Property": measure_name,
+                    },
+                    "Name": f"{table_name}.{measure_name}",
+                })
+
+            if select_clause:
+                config["prototypeQuery"] = {
+                    "Version": 2,
+                    "From": from_clause,
+                    "Select": select_clause,
+                }
+
+        return config
+
+    def _add_visual_pbir_enhanced(self, page_name: str, visual_type: str,
+                                   x: int, y: int, width: int, height: int,
+                                   table_name: str, column_name: str,
+                                   measure_name: str) -> Dict[str, Any]:
+        """Add a visual in PBIR-Enhanced format"""
+        import uuid
+
+        if not self.current_project or not self.current_project.pbir_definition_folder:
+            return {"error": "No PBIR definition folder found"}
+
+        pages_folder = self.current_project.pbir_definition_folder / "pages"
+        if not pages_folder.exists():
+            return {"error": "No pages folder found"}
+
+        # Find the target page
+        target_page_folder = None
+        target_page_name = page_name
+
+        for page_folder in pages_folder.iterdir():
+            if not page_folder.is_dir():
+                continue
+
+            if page_folder.name == page_name:
+                target_page_folder = page_folder
+                break
+
+            page_json_path = page_folder / "page.json"
+            if page_json_path.exists():
+                try:
+                    with open(page_json_path, 'r', encoding='utf-8') as f:
+                        page_data = json.load(f)
+                    dn = page_data.get("displayName", page_data.get("name", ""))
+                    if dn.lower() == page_name.lower():
+                        target_page_folder = page_folder
+                        target_page_name = dn
+                        break
+                except Exception:
+                    pass
+
+        if not target_page_folder:
+            return {"error": f"Page '{page_name}' not found"}
+
+        # Create the visual
+        visual_id = str(uuid.uuid4()).replace("-", "")[:20]
+        visual_folder = target_page_folder / "visuals" / visual_id
+        visual_folder.mkdir(parents=True, exist_ok=True)
+
+        visual_config = self._build_visual_config(
+            visual_id, visual_type, x, y, width, height,
+            table_name, column_name, measure_name
+        )
+
+        visual_data = {
+            "$schema": "https://developer.microsoft.com/json-schemas/fabric/item/report/definition/visualContainer/1.0.0/schema.json",
+            "config": visual_config,
+        }
+
+        visual_json_path = visual_folder / "visual.json"
+        with open(visual_json_path, 'w', encoding='utf-8') as f:
+            json.dump(visual_data, f, indent=2, ensure_ascii=False)
+
+        # Update the cached visual files list
+        self.current_project.visual_json_files.append(visual_json_path)
+
+        logger.info(f"Added visual '{visual_type}' (ID: {visual_id}) to page '{target_page_name}'")
+
+        return {
+            "success": True,
+            "visual_id": visual_id,
+            "visual_type": visual_type,
+            "page_name": target_page_name,
+            "position": {"x": x, "y": y, "width": width, "height": height},
+            "file_path": str(visual_json_path),
+        }
+
+    def _add_visual_pbir_legacy(self, page_name: str, visual_type: str,
+                                 x: int, y: int, width: int, height: int,
+                                 table_name: str, column_name: str,
+                                 measure_name: str) -> Dict[str, Any]:
+        """Add a visual in PBIR-Legacy format"""
+        import uuid
+
+        if not self.current_project or not self.current_project.report_json_path:
+            return {"error": "No report.json found"}
+
+        self._cache_file_content(self.current_project.report_json_path)
+
+        with open(self.current_project.report_json_path, 'r', encoding='utf-8') as f:
+            report_data = json.load(f)
+
+        sections = report_data.get("sections", [])
+        target_section = None
+
+        for section in sections:
+            dn = section.get("displayName", section.get("name", ""))
+            if dn.lower() == page_name.lower() or section.get("name", "") == page_name:
+                target_section = section
+                break
+
+        if not target_section:
+            return {"error": f"Page '{page_name}' not found"}
+
+        visual_id = str(uuid.uuid4()).replace("-", "")[:20]
+        visual_config = self._build_visual_config(
+            visual_id, visual_type, x, y, width, height,
+            table_name, column_name, measure_name
+        )
+
+        new_container = {
+            "name": visual_id,
+            "config": visual_config,
+            "x": x,
+            "y": y,
+            "width": width,
+            "height": height,
+        }
+
+        if "visualContainers" not in target_section:
+            target_section["visualContainers"] = []
+
+        target_section["visualContainers"].append(new_container)
+
+        with open(self.current_project.report_json_path, 'w', encoding='utf-8') as f:
+            json.dump(report_data, f, indent=2, ensure_ascii=False)
+
+        target_display = target_section.get("displayName", page_name)
+        logger.info(f"Added visual '{visual_type}' (ID: {visual_id}) to page '{target_display}'")
+
+        return {
+            "success": True,
+            "visual_id": visual_id,
+            "visual_type": visual_type,
+            "page_name": target_display,
+            "position": {"x": x, "y": y, "width": width, "height": height},
+        }
+
+    def update_visual(self, page_name: str, visual_id: str,
+                      visual_type: str = None,
+                      x: int = None, y: int = None,
+                      width: int = None, height: int = None,
+                      table_name: str = None, column_name: str = None,
+                      measure_name: str = None) -> Dict[str, Any]:
+        """
+        Update properties of an existing visual.
+
+        Only non-None parameters will be updated.
+
+        Args:
+            page_name: Display name or ID of the page
+            visual_id: ID or name of the visual to update
+            visual_type: New visual type (optional)
+            x: New X position (optional)
+            y: New Y position (optional)
+            width: New width (optional)
+            height: New height (optional)
+            table_name: New table binding (optional, clears old bindings)
+            column_name: New column binding (optional, requires table_name)
+            measure_name: New measure binding (optional, requires table_name)
+
+        Returns:
+            Dict with update result
+        """
+        if not self.current_project:
+            return {"error": "No project loaded"}
+
+        try:
+            if self.current_project.is_pbir_enhanced:
+                return self._update_visual_pbir_enhanced(
+                    page_name, visual_id, visual_type, x, y, width, height,
+                    table_name, column_name, measure_name
+                )
+            elif self.current_project.report_json_path:
+                return self._update_visual_pbir_legacy(
+                    page_name, visual_id, visual_type, x, y, width, height,
+                    table_name, column_name, measure_name
+                )
+            else:
+                return {"error": "No report found in project"}
+        except Exception as e:
+            logger.error(f"Error updating visual: {e}")
+            return {"error": str(e)}
+
+    def _update_visual_pbir_enhanced(self, page_name, visual_id, visual_type,
+                                      x, y, width, height,
+                                      table_name, column_name, measure_name):
+        """Update a visual in PBIR-Enhanced format"""
+        if not self.current_project or not self.current_project.pbir_definition_folder:
+            return {"error": "No PBIR definition folder found"}
+
+        pages_folder = self.current_project.pbir_definition_folder / "pages"
+
+        # Find the page and visual JSON file
+        target_visual_path = None
+        target_page_name = page_name
+
+        for page_folder in pages_folder.iterdir():
+            if not page_folder.is_dir():
+                continue
+
+            matched = page_folder.name == page_name
+            if not matched:
+                pj = page_folder / "page.json"
+                if pj.exists():
+                    try:
+                        with open(pj, 'r', encoding='utf-8') as f:
+                            pd = json.load(f)
+                        dn = pd.get("displayName", pd.get("name", ""))
+                        if dn.lower() == page_name.lower():
+                            matched = True
+                            target_page_name = dn
+                    except Exception:
+                        pass
+
+            if matched:
+                visuals_folder = page_folder / "visuals"
+                if visuals_folder.exists():
+                    for vf in visuals_folder.iterdir():
+                        if not vf.is_dir():
+                            continue
+                        if vf.name == visual_id:
+                            target_visual_path = vf / "visual.json"
+                            break
+                        vj = vf / "visual.json"
+                        if vj.exists():
+                            try:
+                                with open(vj, 'r', encoding='utf-8') as f:
+                                    vd = json.load(f)
+                                if vd.get("config", {}).get("name", "") == visual_id:
+                                    target_visual_path = vj
+                                    visual_id = vf.name
+                                    break
+                            except Exception:
+                                pass
+                break
+
+        if not target_visual_path or not target_visual_path.exists():
+            return {"error": f"Visual '{visual_id}' not found on page '{page_name}'"}
+
+        self._cache_file_content(target_visual_path)
+
+        with open(target_visual_path, 'r', encoding='utf-8') as f:
+            visual_data = json.load(f)
+
+        config = visual_data.get("config", {})
+        changes = []
+
+        # Update visual type
+        if visual_type is not None:
+            config["visualType"] = visual_type
+            if "singleVisual" in config:
+                config["singleVisual"]["visualType"] = visual_type
+            changes.append(f"type -> {visual_type}")
+
+        # Update layout/position
+        layouts = config.get("layouts", [{}])
+        if not layouts:
+            layouts = [{}]
+        layout = layouts[0]
+
+        if x is not None:
+            layout["x"] = x
+            changes.append(f"x -> {x}")
+        if y is not None:
+            layout["y"] = y
+            changes.append(f"y -> {y}")
+        if width is not None:
+            layout["width"] = width
+            changes.append(f"width -> {width}")
+        if height is not None:
+            layout["height"] = height
+            changes.append(f"height -> {height}")
+
+        config["layouts"] = [layout]
+
+        # Update data bindings
+        if table_name is not None:
+            source_alias = table_name[0].lower() if table_name else "t"
+            from_clause = [{"Name": source_alias, "Entity": table_name, "Type": 0}]
+            select_clause = []
+
+            if column_name:
+                select_clause.append({
+                    "Column": {
+                        "Expression": {"SourceRef": {"Source": source_alias}},
+                        "Property": column_name,
+                    },
+                    "Name": f"{table_name}.{column_name}",
+                })
+            if measure_name:
+                select_clause.append({
+                    "Measure": {
+                        "Expression": {"SourceRef": {"Source": source_alias}},
+                        "Property": measure_name,
+                    },
+                    "Name": f"{table_name}.{measure_name}",
+                })
+
+            if select_clause:
+                config["prototypeQuery"] = {
+                    "Version": 2,
+                    "From": from_clause,
+                    "Select": select_clause,
+                }
+                changes.append(f"data binding -> {table_name}")
+
+        visual_data["config"] = config
+
+        with open(target_visual_path, 'w', encoding='utf-8') as f:
+            json.dump(visual_data, f, indent=2, ensure_ascii=False)
+
+        logger.info(f"Updated visual '{visual_id}' on page '{target_page_name}': {', '.join(changes)}")
+
+        return {
+            "success": True,
+            "visual_id": visual_id,
+            "page_name": target_page_name,
+            "changes": changes,
+            "file_path": str(target_visual_path),
+        }
+
+    def _update_visual_pbir_legacy(self, page_name, visual_id, visual_type,
+                                    x, y, width, height,
+                                    table_name, column_name, measure_name):
+        """Update a visual in PBIR-Legacy format"""
+        if not self.current_project or not self.current_project.report_json_path:
+            return {"error": "No report.json found"}
+
+        self._cache_file_content(self.current_project.report_json_path)
+
+        with open(self.current_project.report_json_path, 'r', encoding='utf-8') as f:
+            report_data = json.load(f)
+
+        sections = report_data.get("sections", [])
+        target_visual = None
+        target_section = None
+
+        for section in sections:
+            dn = section.get("displayName", section.get("name", ""))
+            if dn.lower() == page_name.lower() or section.get("name", "") == page_name:
+                target_section = section
+                for vc in section.get("visualContainers", []):
+                    vc_config = vc.get("config", {})
+                    if vc_config.get("name", "") == visual_id or vc.get("name", "") == visual_id:
+                        target_visual = vc
+                        break
+                break
+
+        if not target_visual:
+            return {"error": f"Visual '{visual_id}' not found on page '{page_name}'"}
+
+        config = target_visual.get("config", {})
+        changes = []
+
+        if visual_type is not None:
+            config["visualType"] = visual_type
+            changes.append(f"type -> {visual_type}")
+
+        layouts = config.get("layouts", [{}])
+        if not layouts:
+            layouts = [{}]
+        layout = layouts[0]
+
+        if x is not None:
+            layout["x"] = x
+            target_visual["x"] = x
+            changes.append(f"x -> {x}")
+        if y is not None:
+            layout["y"] = y
+            target_visual["y"] = y
+            changes.append(f"y -> {y}")
+        if width is not None:
+            layout["width"] = width
+            target_visual["width"] = width
+            changes.append(f"width -> {width}")
+        if height is not None:
+            layout["height"] = height
+            target_visual["height"] = height
+            changes.append(f"height -> {height}")
+
+        config["layouts"] = [layout]
+        target_visual["config"] = config
+
+        with open(self.current_project.report_json_path, 'w', encoding='utf-8') as f:
+            json.dump(report_data, f, indent=2, ensure_ascii=False)
+
+        page_display = target_section.get("displayName", page_name) if target_section else page_name
+        logger.info(f"Updated visual '{visual_id}' on page '{page_display}': {', '.join(changes)}")
+
+        return {
+            "success": True,
+            "visual_id": visual_id,
+            "page_name": page_display,
+            "changes": changes,
+        }
+
+    def delete_visual(self, page_name: str, visual_id: str) -> Dict[str, Any]:
+        """
+        Delete a visual from a page.
+
+        Args:
+            page_name: Display name or ID of the page
+            visual_id: ID or name of the visual to delete
+
+        Returns:
+            Dict with deletion result
+        """
+        if not self.current_project:
+            return {"error": "No project loaded"}
+
+        try:
+            if self.current_project.is_pbir_enhanced:
+                return self._delete_visual_pbir_enhanced(page_name, visual_id)
+            elif self.current_project.report_json_path:
+                return self._delete_visual_pbir_legacy(page_name, visual_id)
+            else:
+                return {"error": "No report found in project"}
+        except Exception as e:
+            logger.error(f"Error deleting visual: {e}")
+            return {"error": str(e)}
+
+    def _delete_visual_pbir_enhanced(self, page_name: str, visual_id: str) -> Dict[str, Any]:
+        """Delete a visual in PBIR-Enhanced format"""
+        if not self.current_project or not self.current_project.pbir_definition_folder:
+            return {"error": "No PBIR definition folder found"}
+
+        pages_folder = self.current_project.pbir_definition_folder / "pages"
+
+        target_visual_folder = None
+        target_page_name = page_name
+
+        for page_folder in pages_folder.iterdir():
+            if not page_folder.is_dir():
+                continue
+
+            matched = page_folder.name == page_name
+            if not matched:
+                pj = page_folder / "page.json"
+                if pj.exists():
+                    try:
+                        with open(pj, 'r', encoding='utf-8') as f:
+                            pd = json.load(f)
+                        dn = pd.get("displayName", pd.get("name", ""))
+                        if dn.lower() == page_name.lower():
+                            matched = True
+                            target_page_name = dn
+                    except Exception:
+                        pass
+
+            if matched:
+                visuals_folder = page_folder / "visuals"
+                if visuals_folder.exists():
+                    for vf in visuals_folder.iterdir():
+                        if not vf.is_dir():
+                            continue
+                        if vf.name == visual_id:
+                            target_visual_folder = vf
+                            break
+                        vj = vf / "visual.json"
+                        if vj.exists():
+                            try:
+                                with open(vj, 'r', encoding='utf-8') as f:
+                                    vd = json.load(f)
+                                if vd.get("config", {}).get("name", "") == visual_id:
+                                    target_visual_folder = vf
+                                    break
+                            except Exception:
+                                pass
+                break
+
+        if not target_visual_folder:
+            return {"error": f"Visual '{visual_id}' not found on page '{page_name}'"}
+
+        shutil.rmtree(target_visual_folder)
+
+        # Update cached visual files
+        self.current_project.visual_json_files = [
+            v for v in self.current_project.visual_json_files
+            if not str(v).startswith(str(target_visual_folder))
+        ]
+
+        logger.info(f"Deleted visual '{visual_id}' from page '{target_page_name}'")
+
+        return {
+            "success": True,
+            "deleted_visual_id": visual_id,
+            "page_name": target_page_name,
+        }
+
+    def _delete_visual_pbir_legacy(self, page_name: str, visual_id: str) -> Dict[str, Any]:
+        """Delete a visual in PBIR-Legacy format"""
+        if not self.current_project or not self.current_project.report_json_path:
+            return {"error": "No report.json found"}
+
+        self._cache_file_content(self.current_project.report_json_path)
+
+        with open(self.current_project.report_json_path, 'r', encoding='utf-8') as f:
+            report_data = json.load(f)
+
+        sections = report_data.get("sections", [])
+        found = False
+        page_display = page_name
+
+        for section in sections:
+            dn = section.get("displayName", section.get("name", ""))
+            if dn.lower() == page_name.lower() or section.get("name", "") == page_name:
+                page_display = dn
+                containers = section.get("visualContainers", [])
+                for i, vc in enumerate(containers):
+                    vc_config = vc.get("config", {})
+                    if vc_config.get("name", "") == visual_id or vc.get("name", "") == visual_id:
+                        containers.pop(i)
+                        found = True
+                        break
+                section["visualContainers"] = containers
+                break
+
+        if not found:
+            return {"error": f"Visual '{visual_id}' not found on page '{page_name}'"}
+
+        with open(self.current_project.report_json_path, 'w', encoding='utf-8') as f:
+            json.dump(report_data, f, indent=2, ensure_ascii=False)
+
+        logger.info(f"Deleted visual '{visual_id}' from page '{page_display}'")
+
+        return {
+            "success": True,
+            "deleted_visual_id": visual_id,
+            "page_name": page_display,
+        }
+
